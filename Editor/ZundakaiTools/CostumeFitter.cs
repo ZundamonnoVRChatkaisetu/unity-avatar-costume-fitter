@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 using UnityEditor;
 
@@ -23,7 +24,7 @@ namespace ZundakaiTools {
         
         // About情報
         private bool showAboutInfo = false;
-        private string aboutInfo = "全アバター衣装自動調整ツール\nVersion 1.2\n\n衣装をアバターに自動的に合わせるツールです。\n\n使い方：\n1. アバターと衣装をドラッグ＆ドロップで選択\n2. 「ボーンマッピング」タブで対応関係を確認・調整\n3. 「衣装を着せる」ボタンをクリック\n4. 微調整バーで細かい調整を行う";
+        private string aboutInfo = "全アバター衣装自動調整ツール\nVersion 1.3\n\n衣装をアバターに自動的に合わせるツールです。\n\n使い方：\n1. アバターと衣装をドラッグ＆ドロップで選択\n2. 「ボーンマッピング」タブで対応関係を確認・調整\n3. 「衣装を着せる」ボタンをクリック\n4. 微調整バーで細かい調整を行う";
         
         // メッシュキャッシュ（リアルタイム調整用）
         private Dictionary<SkinnedMeshRenderer, Mesh> originalMeshes = new Dictionary<SkinnedMeshRenderer, Mesh>();
@@ -35,12 +36,19 @@ namespace ZundakaiTools {
         private bool showBoneMapping = false;
         private Vector2 boneMappingScrollPos;
         private Dictionary<Transform, Transform> manualBoneMapping = new Dictionary<Transform, Transform>();
+        private Dictionary<Transform, bool> ignoredBones = new Dictionary<Transform, bool>(); // マッピング対象外のボーン
         private List<Transform> avatarBones = new List<Transform>();
         private List<Transform> costumeBones = new List<Transform>();
         private string filterText = "";
         
+        // UI全体のスクロール
+        private Vector2 mainScrollPosition;
+        
         // エディタ更新時間
         private double lastUpdateTime;
+        
+        // 除外キーワード
+        private readonly string[] exclusionKeywords = {"wing", "tail", "eye", "ear", "hair", "tongue", "jaw"};
         
         [MenuItem("ずん解/衣装調整ツール")]
         public static void ShowWindow() {
@@ -102,6 +110,9 @@ namespace ZundakaiTools {
         }
         
         private void OnGUI() {
+            // スクロール開始（ウィンドウ全体をスクロール可能に）
+            mainScrollPosition = EditorGUILayout.BeginScrollView(mainScrollPosition);
+            
             // ヘッダー
             GUILayout.Label("全アバター衣装自動調整ツール", EditorStyles.boldLabel);
             EditorGUILayout.Space();
@@ -189,6 +200,9 @@ namespace ZundakaiTools {
                 DrawAdjustmentControls();
             }
             
+            // スクロール終了
+            EditorGUILayout.EndScrollView();
+            
             // マウス操作やキーボード操作があった場合、再描画をリクエスト
             if (Event.current.type == EventType.MouseMove || 
                 Event.current.type == EventType.KeyDown) {
@@ -222,9 +236,10 @@ namespace ZundakaiTools {
             
             // マッピングテーブルのヘッダー
             EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("アバターのボーン", EditorStyles.boldLabel, GUILayout.Width(200));
-            EditorGUILayout.LabelField("衣装のボーン", EditorStyles.boldLabel, GUILayout.Width(200));
-            EditorGUILayout.LabelField("対応状態", EditorStyles.boldLabel, GUILayout.Width(100));
+            EditorGUILayout.LabelField("アバターのボーン", EditorStyles.boldLabel, GUILayout.Width(180));
+            EditorGUILayout.LabelField("衣装のボーン", EditorStyles.boldLabel, GUILayout.Width(180));
+            EditorGUILayout.LabelField("対応状態", EditorStyles.boldLabel, GUILayout.Width(80));
+            EditorGUILayout.LabelField("操作", EditorStyles.boldLabel, GUILayout.Width(60));
             EditorGUILayout.EndHorizontal();
             
             // スクロール開始
@@ -235,10 +250,16 @@ namespace ZundakaiTools {
                 UpdateBoneLists();
             }
             
+            // 除外されていないボーンのみ表示
+            List<Transform> displayBones = new List<Transform>();
+            foreach (Transform bone in avatarBones) {
+                if (!ignoredBones.ContainsKey(bone) || !ignoredBones[bone]) {
+                    displayBones.Add(bone);
+                }
+            }
+            
             // 対応表示
-            for (int i = 0; i < avatarBones.Count; i++) {
-                Transform avatarBone = avatarBones[i];
-                
+            foreach (Transform avatarBone in displayBones) {
                 // フィルタリング
                 if (!string.IsNullOrEmpty(filterText) && 
                     !avatarBone.name.ToLowerInvariant().Contains(filterText.ToLowerInvariant())) {
@@ -247,8 +268,12 @@ namespace ZundakaiTools {
                 
                 EditorGUILayout.BeginHorizontal();
                 
-                // アバターボーン
-                EditorGUILayout.LabelField(avatarBone.name, GUILayout.Width(200));
+                // アバターボーン - 選択可能に
+                if (GUILayout.Button(avatarBone.name, EditorStyles.label, GUILayout.Width(180))) {
+                    // ボーンをヒエラルキー上で選択
+                    Selection.activeObject = avatarBone.gameObject;
+                    EditorGUIUtility.PingObject(avatarBone.gameObject);
+                }
                 
                 // 衣装ボーン選択ドロップダウン
                 Transform mappedBone = null;
@@ -263,11 +288,12 @@ namespace ZundakaiTools {
                 int selectedIndex = -1;
                 List<string> options = new List<string>();
                 options.Add("自動検出");
+                options.Add("マッピングなし"); // マッピングなしのオプションを追加
                 
                 for (int j = 0; j < costumeBones.Count; j++) {
                     options.Add(costumeBones[j].name);
                     if (mappedBone == costumeBones[j]) {
-                        selectedIndex = j + 1; // +1 は "自動検出" の分
+                        selectedIndex = j + 2; // +2 は "自動検出" と "マッピングなし" の分
                     }
                 }
                 
@@ -277,7 +303,7 @@ namespace ZundakaiTools {
                 }
                 
                 // ドロップダウン表示
-                int newSelectedIndex = EditorGUILayout.Popup(selectedIndex, options.ToArray(), GUILayout.Width(200));
+                int newSelectedIndex = EditorGUILayout.Popup(selectedIndex, options.ToArray(), GUILayout.Width(180));
                 
                 // 選択変更時の処理
                 if (newSelectedIndex != selectedIndex) {
@@ -286,9 +312,12 @@ namespace ZundakaiTools {
                         if (manualBoneMapping.ContainsKey(avatarBone)) {
                             manualBoneMapping.Remove(avatarBone);
                         }
+                    } else if (newSelectedIndex == 1) {
+                        // マッピングなしを選択した場合
+                        manualBoneMapping[avatarBone] = null;
                     } else {
                         // 特定のボーンを選択した場合はマッピングに追加
-                        manualBoneMapping[avatarBone] = costumeBones[newSelectedIndex - 1];
+                        manualBoneMapping[avatarBone] = costumeBones[newSelectedIndex - 2];
                     }
                 }
                 
@@ -296,30 +325,64 @@ namespace ZundakaiTools {
                 string statusLabel = "未マッピング";
                 Color originalColor = GUI.color;
                 
-                if (mappedBone != null) {
-                    if (manualBoneMapping.ContainsKey(avatarBone)) {
+                if (manualBoneMapping.ContainsKey(avatarBone)) {
+                    if (manualBoneMapping[avatarBone] == null) {
+                        statusLabel = "対象外";
+                        GUI.color = Color.gray;
+                    } else {
                         statusLabel = "手動設定";
                         GUI.color = Color.green;
-                    } else {
-                        statusLabel = "自動検出";
-                        GUI.color = Color.cyan;
                     }
+                } else if (mappedBone != null) {
+                    statusLabel = "自動検出";
+                    GUI.color = Color.cyan;
                 } else {
                     GUI.color = Color.yellow;
                 }
                 
-                EditorGUILayout.LabelField(statusLabel, GUILayout.Width(100));
+                EditorGUILayout.LabelField(statusLabel, GUILayout.Width(80));
                 GUI.color = originalColor;
                 
+                // ボーンを除外/復活するボタン
+                if (ignoredBones.ContainsKey(avatarBone) && ignoredBones[avatarBone]) {
+                    if (GUILayout.Button("復活", GUILayout.Width(60))) {
+                        ignoredBones[avatarBone] = false;
+                    }
+                } else {
+                    if (GUILayout.Button("除外", GUILayout.Width(60))) {
+                        ignoredBones[avatarBone] = true;
+                    }
+                }
+                
                 EditorGUILayout.EndHorizontal();
+                
+                // 衣装のボーンを選択した場合も同様に処理
+                if (mappedBone != null && manualBoneMapping.ContainsKey(avatarBone) && manualBoneMapping[avatarBone] != null) {
+                    if (GUILayout.Button("  ↳ " + mappedBone.name, EditorStyles.label, GUILayout.Width(180))) {
+                        // 衣装のボーンをヒエラルキー上で選択
+                        Selection.activeObject = mappedBone.gameObject;
+                        EditorGUIUtility.PingObject(mappedBone.gameObject);
+                    }
+                    EditorGUILayout.Space();
+                }
             }
             
             EditorGUILayout.EndScrollView();
             
+            EditorGUILayout.BeginHorizontal();
+            
             // マッピングのリセットボタン
-            if (GUILayout.Button("マッピングをリセット", GUILayout.Height(30))) {
+            if (GUILayout.Button("マッピングをリセット", GUILayout.Height(30), GUILayout.Width(150))) {
                 manualBoneMapping.Clear();
             }
+            
+            // 除外ボーンのリセットボタン
+            if (GUILayout.Button("除外ボーンをリセット", GUILayout.Height(30), GUILayout.Width(150))) {
+                ignoredBones.Clear();
+                UpdateBoneLists(); // ボーンリストを再生成
+            }
+            
+            EditorGUILayout.EndHorizontal();
             
             EditorGUILayout.EndVertical();
         }
@@ -327,6 +390,11 @@ namespace ZundakaiTools {
         // 対応するボーンを見つける（自動）
         private Transform FindCorrespondingBone(Transform avatarBone) {
             if (avatarBone == null || costumeBones.Count == 0) return null;
+            
+            // マッピングなしに設定されている場合はnullを返す
+            if (manualBoneMapping.ContainsKey(avatarBone) && manualBoneMapping[avatarBone] == null) {
+                return null;
+            }
             
             // 1. 名前が完全一致するボーンを探す
             foreach (Transform bone in costumeBones) {
@@ -374,9 +442,29 @@ namespace ZundakaiTools {
             
             // アバターのボーンを取得
             if (avatarObject != null) {
+                // すべてのボーンを取得
+                foreach (Transform bone in avatarObject.GetComponentsInChildren<Transform>()) {
+                    // 特定のキーワードを含むボーンは除外
+                    bool shouldExclude = false;
+                    foreach (string keyword in exclusionKeywords) {
+                        if (bone.name.ToLowerInvariant().Contains(keyword.ToLowerInvariant())) {
+                            shouldExclude = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!shouldExclude) {
+                        avatarBones.Add(bone);
+                    } else {
+                        // 除外されたボーンを記録
+                        ignoredBones[bone] = true;
+                    }
+                }
+                
+                // Animatorがある場合はそのボーンも優先的に追加
                 Animator avatarAnimator = avatarObject.GetComponent<Animator>();
                 if (avatarAnimator != null && avatarAnimator.isHuman) {
-                    // 主要なヒューマノイドボーンを追加
+                    // 主要なヒューマノイドボーンを追加（あれば上書き）
                     foreach (HumanBodyBones boneType in System.Enum.GetValues(typeof(HumanBodyBones))) {
                         if (boneType == HumanBodyBones.LastBone) continue;
                         
@@ -385,15 +473,6 @@ namespace ZundakaiTools {
                             avatarBones.Add(bone);
                         }
                     }
-                    
-                    // 他のボーンも追加（オプション）
-                    /*
-                    foreach (Transform bone in avatarObject.GetComponentsInChildren<Transform>()) {
-                        if (!avatarBones.Contains(bone)) {
-                            avatarBones.Add(bone);
-                        }
-                    }
-                    */
                 }
             }
             
@@ -418,14 +497,12 @@ namespace ZundakaiTools {
                     }
                 }
                 
-                // 他のボーンも追加（オプション）
-                /*
+                // 他のボーンも追加（必要に応じて）
                 foreach (Transform bone in costumeObject.GetComponentsInChildren<Transform>()) {
                     if (!costumeBones.Contains(bone)) {
                         costumeBones.Add(bone);
                     }
                 }
-                */
             }
             
             // ボーンを階層順にソート
@@ -641,6 +718,14 @@ namespace ZundakaiTools {
         
         // 対応するアバターのボーンを見つける（改良版）
         private Transform FindCorrespondingAvatarBone(Animator avatarAnimator, string boneName, Transform originalBone) {
+            // 除外対象のアバターボーンがある場合はスキップ
+            foreach (var pair in manualBoneMapping) {
+                // マッピングなしに設定されているボーンと衣装ボーン名が一致する場合は対象外
+                if (pair.Value == null && pair.Key.name.Contains(boneName)) {
+                    return null;
+                }
+            }
+            
             // 1. 名前が完全一致する場合
             if (avatarBoneMapping != null && avatarBoneMapping.TryGetValue(boneName, out Transform exactMatch)) {
                 return exactMatch;
@@ -665,8 +750,13 @@ namespace ZundakaiTools {
                 float distance = float.MaxValue;
                 Transform bestMatch = null;
                 
-                // アバターのすべてのボーンから最も近い位置のものを探す
+                // アバターのすべてのボーンから最も近い位置のものを探す（除外対象以外）
                 foreach (var bone in avatarAnimator.transform.GetComponentsInChildren<Transform>()) {
+                    // 除外対象のボーンはスキップ
+                    if (ignoredBones.ContainsKey(bone) && ignoredBones[bone]) {
+                        continue;
+                    }
+                    
                     float currentDist = Vector3.Distance(bone.localPosition, localPos);
                     if (currentDist < distance) {
                         distance = currentDist;
@@ -694,11 +784,16 @@ namespace ZundakaiTools {
                 }
             }
             
-            // 再帰的にボーン階層から検索
+            // 再帰的にボーン階層から検索（除外対象以外）
             return SearchBoneRecursively(avatarAnimator.transform, boneName);
         }
         
         private Transform SearchBoneRecursively(Transform parent, string boneName) {
+            // 除外対象のボーンはスキップ
+            if (ignoredBones.ContainsKey(parent) && ignoredBones[parent]) {
+                return null;
+            }
+            
             if (parent.name.Contains(boneName)) {
                 return parent;
             }
