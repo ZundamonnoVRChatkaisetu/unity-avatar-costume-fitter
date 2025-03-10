@@ -34,7 +34,7 @@ namespace ZundakaiTools {
         
         // About情報
         private bool showAboutInfo = false;
-        private string aboutInfo = "全アバター衣装自動調整ツール\nVersion 1.4\n\n衣装をアバターに自動的に合わせるツールです。\n\n使い方：\n1. アバターと衣装をドラッグ＆ドロップで選択\n2. 「ボーンマッピング」タブで対応関係を確認・調整\n3. 「衣装を着せる」ボタンをクリック\n4. 微調整バーで細かい調整を行う";
+        private string aboutInfo = "全アバター衣装自動調整ツール\nVersion 1.4.2\n\n衣装をアバターに自動的に合わせるツールです。\n\n使い方：\n1. アバターと衣装をドラッグ＆ドロップで選択\n2. 「ボーンマッピング」タブで対応関係を確認・調整\n3. 「衣装を着せる」ボタンをクリック\n4. 微調整バーで細かい調整を行う";
         
         // メッシュキャッシュ（リアルタイム調整用）
         private Dictionary<SkinnedMeshRenderer, Mesh> originalMeshes = new Dictionary<SkinnedMeshRenderer, Mesh>();
@@ -50,6 +50,12 @@ namespace ZundakaiTools {
         private List<Transform> avatarBones = new List<Transform>();
         private List<Transform> costumeBones = new List<Transform>();
         private string filterText = "";
+        
+        // 階層パス情報
+        private Dictionary<Transform, string> avatarBoneHierarchyPaths = new Dictionary<Transform, string>();
+        private Dictionary<Transform, string> costumeBoneHierarchyPaths = new Dictionary<Transform, string>();
+        private Dictionary<string, List<Transform>> avatarBonesByPath = new Dictionary<string, List<Transform>>();
+        private Dictionary<string, List<Transform>> costumeBonesByPath = new Dictionary<string, List<Transform>>();
         
         // UI全体のスクロール
         private Vector2 mainScrollPosition;
@@ -617,17 +623,65 @@ namespace ZundakaiTools {
             }
             
             // 2. 正規化された名前で比較
-            string normalizedName = AvatarUtility.NormalizeBoneName(avatarBone.name).ToLowerInvariant();
+            string normalizedAvatarName = AvatarUtility.NormalizeBoneName(avatarBone.name).ToLowerInvariant();
             foreach (Transform bone in costumeBones) {
-                string boneName = AvatarUtility.NormalizeBoneName(bone.name).ToLowerInvariant();
-                if (boneName == normalizedName || 
-                    boneName.Contains(normalizedName) || 
-                    normalizedName.Contains(boneName)) {
+                string normalizedCostumeName = AvatarUtility.NormalizeBoneName(bone.name).ToLowerInvariant();
+                if (normalizedCostumeName == normalizedAvatarName || 
+                    normalizedCostumeName.Contains(normalizedAvatarName) || 
+                    normalizedAvatarName.Contains(normalizedCostumeName)) {
                     return bone;
                 }
             }
             
-            // 3. 位置ベースのマッピング
+            // 3. 階層ベースのマッピング
+            if (avatarBoneHierarchyPaths.ContainsKey(avatarBone)) {
+                string avatarPath = avatarBoneHierarchyPaths[avatarBone];
+                string[] avatarPathSegments = avatarPath.Split('/');
+                
+                // ボーンの深さ（階層レベル）
+                int avatarBoneDepth = avatarPathSegments.Length;
+                
+                // 同じ階層深さのボーンを候補として収集
+                List<Transform> depthMatchedBones = new List<Transform>();
+                
+                foreach (var bone in costumeBones) {
+                    if (costumeBoneHierarchyPaths.ContainsKey(bone)) {
+                        string costumePath = costumeBoneHierarchyPaths[bone];
+                        string[] costumePathSegments = costumePath.Split('/');
+                        
+                        // 階層の深さが一致した場合、候補に追加
+                        if (costumePathSegments.Length == avatarBoneDepth) {
+                            depthMatchedBones.Add(bone);
+                        }
+                    }
+                }
+                
+                // 候補ボーンの中から、親の名前も似ているものを優先
+                if (depthMatchedBones.Count > 0) {
+                    Transform bestMatch = null;
+                    float bestScore = 0;
+                    
+                    foreach (var bone in depthMatchedBones) {
+                        string costumePath = costumeBoneHierarchyPaths[bone];
+                        string[] costumePathSegments = costumePath.Split('/');
+                        
+                        // 親子関係の類似度スコアを計算
+                        float score = CalculateHierarchySimilarityScore(avatarPathSegments, costumePathSegments);
+                        
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestMatch = bone;
+                        }
+                    }
+                    
+                    // 十分な類似度があればマッピング
+                    if (bestScore > 0.5f) {
+                        return bestMatch;
+                    }
+                }
+            }
+            
+            // 4. 位置ベースのマッピング
             Vector3 avatarBonePos = avatarBone.position;
             Transform closestBone = null;
             float closestDistance = float.MaxValue;
@@ -648,10 +702,52 @@ namespace ZundakaiTools {
             return null;
         }
         
+        // 階層構造の類似度を計算
+        private float CalculateHierarchySimilarityScore(string[] avatarPathSegments, string[] costumePathSegments) {
+            if (avatarPathSegments.Length != costumePathSegments.Length) return 0;
+            
+            float totalScore = 0;
+            float maxPossibleScore = avatarPathSegments.Length;
+            
+            // 各階層レベルごとに名前の類似度を評価
+            for (int i = 0; i < avatarPathSegments.Length; i++) {
+                string avatarSegment = AvatarUtility.NormalizeBoneName(avatarPathSegments[i]).ToLowerInvariant();
+                string costumeSegment = AvatarUtility.NormalizeBoneName(costumePathSegments[i]).ToLowerInvariant();
+                
+                // 完全一致
+                if (avatarSegment == costumeSegment) {
+                    totalScore += 1.0f;
+                }
+                // 部分一致（含む/含まれる）
+                else if (avatarSegment.Contains(costumeSegment) || costumeSegment.Contains(avatarSegment)) {
+                    totalScore += 0.7f;
+                }
+                // L/R, Left/Rightなどの対応
+                else if ((avatarSegment.Contains("left") && costumeSegment.Contains("l")) ||
+                         (avatarSegment.Contains("l") && costumeSegment.Contains("left")) ||
+                         (avatarSegment.Contains("right") && costumeSegment.Contains("r")) ||
+                         (avatarSegment.Contains("r") && costumeSegment.Contains("right"))) {
+                    totalScore += 0.8f;
+                }
+                // 記号の違い (_/.など)
+                else if (avatarSegment.Replace("_", "").Replace(".", "") == 
+                         costumeSegment.Replace("_", "").Replace(".", "")) {
+                    totalScore += 0.9f;
+                }
+            }
+            
+            // 正規化されたスコアを返す (0～1の範囲)
+            return totalScore / maxPossibleScore;
+        }
+        
         // ボーンリストの更新
         private void UpdateBoneLists() {
             avatarBones.Clear();
             costumeBones.Clear();
+            avatarBoneHierarchyPaths.Clear();
+            costumeBoneHierarchyPaths.Clear();
+            avatarBonesByPath.Clear();
+            costumeBonesByPath.Clear();
             
             // アバターのボーンを取得
             if (avatarObject != null) {
@@ -660,23 +756,7 @@ namespace ZundakaiTools {
                 
                 if (armatureTransform != null) {
                     // Armature配下のすべてのボーンを取得
-                    foreach (Transform bone in armatureTransform.GetComponentsInChildren<Transform>()) {
-                        // 特定のキーワードを含むボーンは除外
-                        bool shouldExclude = false;
-                        foreach (string keyword in exclusionKeywords) {
-                            if (bone.name.ToLowerInvariant().Contains(keyword.ToLowerInvariant())) {
-                                shouldExclude = true;
-                                break;
-                            }
-                        }
-                        
-                        if (!shouldExclude) {
-                            avatarBones.Add(bone);
-                        } else {
-                            // 除外されたボーンを記録
-                            ignoredBones[bone] = true;
-                        }
-                    }
+                    ProcessBoneHierarchy(armatureTransform, "", true);
                 } else {
                     // Armatureが見つからない場合は従来の方法を使用
                     foreach (Transform bone in avatarObject.GetComponentsInChildren<Transform>()) {
@@ -691,6 +771,16 @@ namespace ZundakaiTools {
                         
                         if (!shouldExclude) {
                             avatarBones.Add(bone);
+                            
+                            // 階層パスを記録
+                            string hierarchyPath = GetHierarchyPath(bone);
+                            avatarBoneHierarchyPaths[bone] = hierarchyPath;
+                            
+                            // パスベースのルックアップテーブルに追加
+                            if (!avatarBonesByPath.ContainsKey(hierarchyPath)) {
+                                avatarBonesByPath[hierarchyPath] = new List<Transform>();
+                            }
+                            avatarBonesByPath[hierarchyPath].Add(bone);
                         } else {
                             // 除外されたボーンを記録
                             ignoredBones[bone] = true;
@@ -708,6 +798,16 @@ namespace ZundakaiTools {
                         Transform bone = avatarAnimator.GetBoneTransform(boneType);
                         if (bone != null && !avatarBones.Contains(bone)) {
                             avatarBones.Add(bone);
+                            
+                            // 階層パスを記録
+                            string hierarchyPath = GetHierarchyPath(bone);
+                            avatarBoneHierarchyPaths[bone] = hierarchyPath;
+                            
+                            // パスベースのルックアップテーブルに追加
+                            if (!avatarBonesByPath.ContainsKey(hierarchyPath)) {
+                                avatarBonesByPath[hierarchyPath] = new List<Transform>();
+                            }
+                            avatarBonesByPath[hierarchyPath].Add(bone);
                         }
                     }
                 }
@@ -715,29 +815,67 @@ namespace ZundakaiTools {
             
             // 衣装のボーンを取得
             if (costumeObject != null) {
-                // スキンメッシュレンダラーのボーンを取得
-                SkinnedMeshRenderer[] renderers = costumeObject.GetComponentsInChildren<SkinnedMeshRenderer>();
-                foreach (SkinnedMeshRenderer renderer in renderers) {
-                    if (renderer.bones != null) {
-                        foreach (Transform bone in renderer.bones) {
-                            if (bone != null && !costumeBones.Contains(bone)) {
-                                costumeBones.Add(bone);
+                // Armature配下のボーンのみを選択対象とする
+                Transform costumeArmatureTransform = FindArmatureTransform(costumeObject.transform);
+                
+                if (costumeArmatureTransform != null) {
+                    // Armature配下のすべてのボーンを取得
+                    ProcessBoneHierarchy(costumeArmatureTransform, "", false);
+                } else {
+                    // スキンメッシュレンダラーのボーンを取得
+                    SkinnedMeshRenderer[] renderers = costumeObject.GetComponentsInChildren<SkinnedMeshRenderer>();
+                    foreach (SkinnedMeshRenderer renderer in renderers) {
+                        if (renderer.bones != null) {
+                            foreach (Transform bone in renderer.bones) {
+                                if (bone != null && !costumeBones.Contains(bone)) {
+                                    costumeBones.Add(bone);
+                                    
+                                    // 階層パスを記録
+                                    string hierarchyPath = GetHierarchyPath(bone);
+                                    costumeBoneHierarchyPaths[bone] = hierarchyPath;
+                                    
+                                    // パスベースのルックアップテーブルに追加
+                                    if (!costumeBonesByPath.ContainsKey(hierarchyPath)) {
+                                        costumeBonesByPath[hierarchyPath] = new List<Transform>();
+                                    }
+                                    costumeBonesByPath[hierarchyPath].Add(bone);
+                                }
                             }
                         }
                     }
-                }
-                
-                // ルートボーンが含まれていない場合は追加
-                foreach (SkinnedMeshRenderer renderer in renderers) {
-                    if (renderer.rootBone != null && !costumeBones.Contains(renderer.rootBone)) {
-                        costumeBones.Add(renderer.rootBone);
+                    
+                    // ルートボーンが含まれていない場合は追加
+                    foreach (SkinnedMeshRenderer renderer in renderers) {
+                        if (renderer.rootBone != null && !costumeBones.Contains(renderer.rootBone)) {
+                            costumeBones.Add(renderer.rootBone);
+                            
+                            // 階層パスを記録
+                            string hierarchyPath = GetHierarchyPath(renderer.rootBone);
+                            costumeBoneHierarchyPaths[renderer.rootBone] = hierarchyPath;
+                            
+                            // パスベースのルックアップテーブルに追加
+                            if (!costumeBonesByPath.ContainsKey(hierarchyPath)) {
+                                costumeBonesByPath[hierarchyPath] = new List<Transform>();
+                            }
+                            costumeBonesByPath[hierarchyPath].Add(renderer.rootBone);
+                        }
                     }
-                }
-                
-                // 他のボーンも追加（必要に応じて）
-                foreach (Transform bone in costumeObject.GetComponentsInChildren<Transform>()) {
-                    if (!costumeBones.Contains(bone)) {
-                        costumeBones.Add(bone);
+                    
+                    // 他のボーンも追加（必要に応じて）
+                    foreach (Transform bone in costumeObject.GetComponentsInChildren<Transform>()) {
+                        if (!costumeBones.Contains(bone)) {
+                            costumeBones.Add(bone);
+                            
+                            // 階層パスを記録
+                            string hierarchyPath = GetHierarchyPath(bone);
+                            costumeBoneHierarchyPaths[bone] = hierarchyPath;
+                            
+                            // パスベースのルックアップテーブルに追加
+                            if (!costumeBonesByPath.ContainsKey(hierarchyPath)) {
+                                costumeBonesByPath[hierarchyPath] = new List<Transform>();
+                            }
+                            costumeBonesByPath[hierarchyPath].Add(bone);
+                        }
                     }
                 }
             }
@@ -745,6 +883,77 @@ namespace ZundakaiTools {
             // ボーンを階層順にソート
             avatarBones.Sort((a, b) => a.name.CompareTo(b.name));
             costumeBones.Sort((a, b) => a.name.CompareTo(b.name));
+            
+            // デバッグ情報
+            Debug.Log($"アバターボーン数: {avatarBones.Count}, 衣装ボーン数: {costumeBones.Count}");
+            Debug.Log($"アバター階層パス数: {avatarBoneHierarchyPaths.Count}, 衣装階層パス数: {costumeBoneHierarchyPaths.Count}");
+        }
+        
+        // ボーン階層を再帰的に処理
+        private void ProcessBoneHierarchy(Transform bone, string parentPath, bool isAvatar) {
+            if (bone == null) return;
+            
+            // 現在のボーンのパスを構築
+            string currentPath = string.IsNullOrEmpty(parentPath) ? bone.name : parentPath + "/" + bone.name;
+            
+            // 特定のキーワードを含むボーンは除外
+            bool shouldExclude = false;
+            foreach (string keyword in exclusionKeywords) {
+                if (bone.name.ToLowerInvariant().Contains(keyword.ToLowerInvariant())) {
+                    shouldExclude = true;
+                    break;
+                }
+            }
+            
+            // アバターまたは衣装のボーンリストに追加
+            if (!shouldExclude) {
+                if (isAvatar) {
+                    avatarBones.Add(bone);
+                    avatarBoneHierarchyPaths[bone] = currentPath;
+                    
+                    if (!avatarBonesByPath.ContainsKey(currentPath)) {
+                        avatarBonesByPath[currentPath] = new List<Transform>();
+                    }
+                    avatarBonesByPath[currentPath].Add(bone);
+                } else {
+                    costumeBones.Add(bone);
+                    costumeBoneHierarchyPaths[bone] = currentPath;
+                    
+                    if (!costumeBonesByPath.ContainsKey(currentPath)) {
+                        costumeBonesByPath[currentPath] = new List<Transform>();
+                    }
+                    costumeBonesByPath[currentPath].Add(bone);
+                }
+            } else if (isAvatar) {
+                // 除外されたボーンを記録（アバターのみ）
+                ignoredBones[bone] = true;
+            }
+            
+            // 子ボーンも処理
+            foreach (Transform child in bone) {
+                ProcessBoneHierarchy(child, currentPath, isAvatar);
+            }
+        }
+        
+        // 階層パスを取得
+        private string GetHierarchyPath(Transform bone) {
+            if (bone == null) return "";
+            
+            List<string> pathSegments = new List<string>();
+            Transform current = bone;
+            
+            // ルートが見つかるまで上に遡っていく
+            while (current != null && current.parent != null) {
+                pathSegments.Insert(0, current.name);
+                current = current.parent;
+                
+                // Armatureレベルまで遡ったら停止
+                if (current.name == "Armature") {
+                    break;
+                }
+            }
+            
+            return string.Join("/", pathSegments.ToArray());
         }
         
         // Armatureトランスフォームを探す
@@ -1027,15 +1236,13 @@ namespace ZundakaiTools {
                         continue;
                     }
                     
-                    string boneName = originalBones[i].name;
-                    
-                    // マッピングテーブルから対応するボーンを取得
-                    Transform avatarBone = FindCorrespondingAvatarBone(avatarAnimator, boneName, originalBones[i]);
+                    // 自動マッピングを試行
+                    Transform avatarBone = FindCorrespondingAvatarBone(avatarAnimator, originalBones[i]);
                     
                     if (avatarBone != null) {
                         newBones[i] = avatarBone;
                     } else {
-                        Debug.LogWarning($"ボーン '{boneName}' がアバターに見つかりませんでした");
+                        Debug.LogWarning($"ボーン '{originalBones[i].name}' がアバターに見つかりませんでした");
                         // 見つからない場合はnullではなく近いボーンを探す
                         HumanBodyBones[] commonBones = {
                             HumanBodyBones.Hips,
@@ -1048,7 +1255,7 @@ namespace ZundakaiTools {
                             Transform commonBone = avatarAnimator.GetBoneTransform(boneType);
                             if (commonBone != null) {
                                 newBones[i] = commonBone;
-                                Debug.Log($"ボーン '{boneName}' の代わりに '{boneType}' を使用します");
+                                Debug.Log($"ボーン '{originalBones[i].name}' の代わりに '{boneType}' を使用します");
                                 break;
                             }
                         }
@@ -1064,8 +1271,8 @@ namespace ZundakaiTools {
                     if (reverseMappings.TryGetValue(costumeRenderer.rootBone, out Transform mappedAvatarBone)) {
                         costumeRenderer.rootBone = mappedAvatarBone;
                     } else {
-                        string rootBoneName = costumeRenderer.rootBone.name;
-                        Transform avatarRootBone = FindCorrespondingAvatarBone(avatarAnimator, rootBoneName, costumeRenderer.rootBone);
+                        // 自動マッピングを試行
+                        Transform avatarRootBone = FindCorrespondingAvatarBone(avatarAnimator, costumeRenderer.rootBone);
                         
                         if (avatarRootBone != null) {
                             costumeRenderer.rootBone = avatarRootBone;
@@ -1096,93 +1303,100 @@ namespace ZundakaiTools {
             }
         }
         
-        // 対応するアバターのボーンを見つける（改良版）
-        private Transform FindCorrespondingAvatarBone(Animator avatarAnimator, string boneName, Transform originalBone) {
-            // 除外対象のアバターボーンがある場合はスキップ
-            foreach (var pair in manualBoneMapping) {
-                // マッピングなしに設定されているボーンと衣装ボーン名が一致する場合は対象外
-                if (pair.Value == null && pair.Key.name.Contains(boneName)) {
-                    return null;
-                }
-            }
-            
-            // 1. 名前が完全一致する場合
-            if (avatarBoneMapping != null && avatarBoneMapping.TryGetValue(boneName, out Transform exactMatch)) {
-                return exactMatch;
-            }
-            
-            // 2. 正規化された名前で検索
-            string normalizedName = AvatarUtility.NormalizeBoneName(boneName);
-            if (avatarBoneMapping != null && avatarBoneMapping.TryGetValue(normalizedName, out Transform normalizedMatch)) {
-                return normalizedMatch;
-            }
-            
-            // 3. ヒューマノイドボーンから推定
-            Transform humanoidMatch = AvatarUtility.GetHumanoidBone(avatarAnimator, boneName);
-            if (humanoidMatch != null) {
-                return humanoidMatch;
-            }
-            
-            // 4. 位置ベースのマッピング（最終手段）
-            if (originalBone != null) {
-                // ボーンの相対位置を計算
-                Vector3 localPos = originalBone.localPosition;
-                float distance = float.MaxValue;
-                Transform bestMatch = null;
-                
-                // アバターのすべてのボーンから最も近い位置のものを探す（除外対象以外）
-                foreach (var bone in avatarAnimator.transform.GetComponentsInChildren<Transform>()) {
-                    // 除外対象のボーンはスキップ
-                    if (ignoredBones.ContainsKey(bone) && ignoredBones[bone]) {
-                        continue;
-                    }
-                    
-                    float currentDist = Vector3.Distance(bone.localPosition, localPos);
-                    if (currentDist < distance) {
-                        distance = currentDist;
-                        bestMatch = bone;
-                    }
-                }
-                
-                if (bestMatch != null) {
-                    return bestMatch;
-                }
-            }
-            
-            // それでも見つからない場合は標準的な検索を試す
-            return FindBoneInAvatar(avatarAnimator, boneName);
-        }
-        
-        private Transform FindBoneInAvatar(Animator avatarAnimator, string boneName) {
-            // まず、Humanoidボーンとしての検索を試行
-            foreach (HumanBodyBones boneType in System.Enum.GetValues(typeof(HumanBodyBones))) {
-                if (boneType == HumanBodyBones.LastBone) continue;
-                
-                Transform bone = avatarAnimator.GetBoneTransform(boneType);
-                if (bone != null && bone.name.Contains(boneName)) {
+        // 階層とボーン名を考慮してアバターボーンを見つける
+        private Transform FindCorrespondingAvatarBone(Animator avatarAnimator, Transform costumeBone) {
+            if (costumeBone == null) return null;
+
+            // 1. 名前が完全一致するボーンを探す
+            foreach (Transform bone in avatarBones) {
+                if (bone.name == costumeBone.name) {
                     return bone;
                 }
             }
             
-            // 再帰的にボーン階層から検索（除外対象以外）
-            return SearchBoneRecursively(avatarAnimator.transform, boneName);
-        }
-        
-        private Transform SearchBoneRecursively(Transform parent, string boneName) {
-            // 除外対象のボーンはスキップ
-            if (ignoredBones.ContainsKey(parent) && ignoredBones[parent]) {
-                return null;
-            }
-            
-            if (parent.name.Contains(boneName)) {
-                return parent;
-            }
-            
-            for (int i = 0; i < parent.childCount; i++) {
-                Transform found = SearchBoneRecursively(parent.GetChild(i), boneName);
-                if (found != null) {
-                    return found;
+            // 2. 階層パスが登録されているか確認
+            if (costumeBoneHierarchyPaths.ContainsKey(costumeBone)) {
+                string costumePath = costumeBoneHierarchyPaths[costumeBone];
+                string[] costumePathSegments = costumePath.Split('/');
+                
+                // 同じ階層深さのボーンを候補として検索
+                List<Transform> depthMatchedBones = new List<Transform>();
+                
+                foreach (var bone in avatarBones) {
+                    if (avatarBoneHierarchyPaths.ContainsKey(bone)) {
+                        string avatarPath = avatarBoneHierarchyPaths[bone];
+                        string[] avatarPathSegments = avatarPath.Split('/');
+                        
+                        // 階層の深さが一致した場合、候補に追加
+                        if (avatarPathSegments.Length == costumePathSegments.Length) {
+                            depthMatchedBones.Add(bone);
+                        }
+                    }
                 }
+                
+                // 候補ボーンの中から、親の名前も似ているものを優先
+                if (depthMatchedBones.Count > 0) {
+                    Transform bestMatch = null;
+                    float bestScore = 0;
+                    
+                    foreach (var bone in depthMatchedBones) {
+                        string avatarPath = avatarBoneHierarchyPaths[bone];
+                        string[] avatarPathSegments = avatarPath.Split('/');
+                        
+                        // 親子関係の類似度スコアを計算
+                        float score = CalculateHierarchySimilarityScore(avatarPathSegments, costumePathSegments);
+                        
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestMatch = bone;
+                        }
+                    }
+                    
+                    // 十分な類似度があればマッピング
+                    if (bestScore > 0.5f) {
+                        return bestMatch;
+                    }
+                }
+            }
+            
+            // 3. 正規化された名前で比較
+            string normalizedCostumeName = AvatarUtility.NormalizeBoneName(costumeBone.name).ToLowerInvariant();
+            foreach (Transform bone in avatarBones) {
+                string normalizedAvatarName = AvatarUtility.NormalizeBoneName(bone.name).ToLowerInvariant();
+                if (normalizedAvatarName == normalizedCostumeName || 
+                    normalizedAvatarName.Contains(normalizedCostumeName) || 
+                    normalizedCostumeName.Contains(normalizedAvatarName)) {
+                    return bone;
+                }
+            }
+            
+            // 4. ヒューマノイドボーンから推定
+            Transform humanoidMatch = AvatarUtility.GetHumanoidBone(avatarAnimator, costumeBone.name);
+            if (humanoidMatch != null) {
+                return humanoidMatch;
+            }
+            
+            // 5. 位置ベースのマッピング（最終手段）
+            Vector3 costumeBonePos = costumeBone.position;
+            Transform closestBone = null;
+            float closestDistance = float.MaxValue;
+            
+            foreach (Transform bone in avatarBones) {
+                // 除外対象のボーンはスキップ
+                if (ignoredBones.ContainsKey(bone) && ignoredBones[bone]) {
+                    continue;
+                }
+                
+                float distance = Vector3.Distance(bone.position, costumeBonePos);
+                if (distance < closestDistance) {
+                    closestDistance = distance;
+                    closestBone = bone;
+                }
+            }
+            
+            // 距離が近すぎる場合のみ返す (一定以上離れていると関係ないボーン)
+            if (closestDistance < 0.5f) {
+                return closestBone;
             }
             
             return null;
