@@ -28,9 +28,13 @@ namespace ZundakaiTools {
         private Dictionary<string, Mesh> costumeMeshes = new Dictionary<string, Mesh>();
         private Dictionary<string, string> meshPartMapping = new Dictionary<string, string>();
         
+        // 部位ごとの参照位置とスケール
+        private Dictionary<string, ReferencePoint> avatarReferencePoints = new Dictionary<string, ReferencePoint>();
+        private Dictionary<string, ReferencePoint> costumeReferencePoints = new Dictionary<string, ReferencePoint>();
+        
         // About情報
         private bool showAboutInfo = false;
-        private string aboutInfo = "全アバター衣装自動調整ツール\nVersion 1.3\n\n衣装をアバターに自動的に合わせるツールです。\n\n使い方：\n1. アバターと衣装をドラッグ＆ドロップで選択\n2. 「ボーンマッピング」タブで対応関係を確認・調整\n3. 「衣装を着せる」ボタンをクリック\n4. 微調整バーで細かい調整を行う";
+        private string aboutInfo = "全アバター衣装自動調整ツール\nVersion 1.4\n\n衣装をアバターに自動的に合わせるツールです。\n\n使い方：\n1. アバターと衣装をドラッグ＆ドロップで選択\n2. 「ボーンマッピング」タブで対応関係を確認・調整\n3. 「衣装を着せる」ボタンをクリック\n4. 微調整バーで細かい調整を行う";
         
         // メッシュキャッシュ（リアルタイム調整用）
         private Dictionary<SkinnedMeshRenderer, Mesh> originalMeshes = new Dictionary<SkinnedMeshRenderer, Mesh>();
@@ -58,13 +62,38 @@ namespace ZundakaiTools {
         
         // ボディパーツ識別キーワード
         private readonly Dictionary<string, string[]> bodyPartKeywords = new Dictionary<string, string[]>() {
-            { "頭", new string[] { "head", "face", "顔", "頭" } },
-            { "胴体", new string[] { "body", "chest", "torso", "trunk", "spine", "胴", "胸", "体" } },
-            { "左腕", new string[] { "leftarm", "left_arm", "l_arm", "左腕", "左手", "larm" } },
-            { "右腕", new string[] { "rightarm", "right_arm", "r_arm", "右腕", "右手", "rarm" } },
-            { "左脚", new string[] { "leftleg", "left_leg", "l_leg", "左脚", "左足", "lleg" } },
-            { "右脚", new string[] { "rightleg", "right_leg", "r_leg", "右脚", "右足", "rleg" } }
+            { "頭", new string[] { "head", "face", "顔", "頭", "helmet", "hat", "cap" } },
+            { "胴体", new string[] { "body", "chest", "torso", "trunk", "spine", "胴", "胸", "体", "waist", "spine", "pelvis", "hips" } },
+            { "左腕", new string[] { "leftarm", "left_arm", "l_arm", "左腕", "左手", "larm", "l.arm", "arm.l", "lhand", "left.arm" } },
+            { "右腕", new string[] { "rightarm", "right_arm", "r_arm", "右腕", "右手", "rarm", "r.arm", "arm.r", "rhand", "right.arm" } },
+            { "左脚", new string[] { "leftleg", "left_leg", "l_leg", "左脚", "左足", "lleg", "l.leg", "leg.l", "lfoot", "left.leg" } },
+            { "右脚", new string[] { "rightleg", "right_leg", "r_leg", "右脚", "右足", "rleg", "r.leg", "leg.r", "rfoot", "right.leg" } }
         };
+        
+        // 部位ごとの参照点を表す構造体
+        private struct ReferencePoint {
+            public Vector3 center;      // 中心位置
+            public Vector3 extents;     // 範囲の大きさ
+            public Vector3 topPoint;    // 上端の位置
+            public Vector3 bottomPoint; // 下端の位置
+            public Vector3 leftPoint;   // 左端の位置
+            public Vector3 rightPoint;  // 右端の位置
+            public Vector3 frontPoint;  // 前端の位置 
+            public Vector3 backPoint;   // 後端の位置
+            
+            public ReferencePoint(Vector3 center, Vector3 extents) {
+                this.center = center;
+                this.extents = extents;
+                
+                // 各端点を計算
+                topPoint = center + new Vector3(0, extents.y, 0);
+                bottomPoint = center - new Vector3(0, extents.y, 0);
+                leftPoint = center - new Vector3(extents.x, 0, 0);
+                rightPoint = center + new Vector3(extents.x, 0, 0);
+                frontPoint = center + new Vector3(0, 0, extents.z);
+                backPoint = center - new Vector3(0, 0, extents.z);
+            }
+        }
         
         [MenuItem("ずん解/衣装調整ツール")]
         public static void ShowWindow() {
@@ -248,6 +277,7 @@ namespace ZundakaiTools {
         // アバターのメッシュを解析
         private void AnalyzeAvatarMeshes() {
             avatarMeshes.Clear();
+            avatarReferencePoints.Clear();
             
             if (avatarObject == null) return;
             
@@ -258,6 +288,9 @@ namespace ZundakaiTools {
                 string partName = IdentifyBodyPart(renderer);
                 avatarMeshes[partName] = renderer.sharedMesh;
                 
+                // 部位ごとの参照点を計算
+                CalculateReferencePoints(renderer, partName, true);
+                
                 // デバッグ情報
                 Debug.Log($"アバターメッシュを検出: {renderer.name} → {partName}");
             }
@@ -267,6 +300,7 @@ namespace ZundakaiTools {
         private void AnalyzeCostumeMeshes() {
             costumeMeshes.Clear();
             meshPartMapping.Clear();
+            costumeReferencePoints.Clear();
             
             if (costumeObject == null) return;
             
@@ -278,8 +312,38 @@ namespace ZundakaiTools {
                 costumeMeshes[renderer.name] = renderer.sharedMesh;
                 meshPartMapping[renderer.name] = partName;
                 
+                // 部位ごとの参照点を計算
+                CalculateReferencePoints(renderer, partName, false);
+                
                 // デバッグ情報
                 Debug.Log($"衣装メッシュを検出: {renderer.name} → {partName}");
+            }
+        }
+        
+        // 部位ごとの参照点を計算
+        private void CalculateReferencePoints(SkinnedMeshRenderer renderer, string partName, bool isAvatar) {
+            if (renderer == null || renderer.sharedMesh == null) return;
+            
+            // メッシュの頂点を取得
+            Vector3[] vertices = renderer.sharedMesh.vertices;
+            if (vertices.Length == 0) return;
+            
+            // バウンディングボックスの計算
+            Bounds bounds = renderer.sharedMesh.bounds;
+            
+            // ボーンスペースからワールドスペースへの変換行列
+            Matrix4x4 localToWorld = renderer.transform.localToWorldMatrix;
+            
+            // 参照点の作成と保存
+            ReferencePoint refPoint = new ReferencePoint(
+                localToWorld.MultiplyPoint3x4(bounds.center),
+                bounds.extents
+            );
+            
+            if (isAvatar) {
+                avatarReferencePoints[partName] = refPoint;
+            } else {
+                costumeReferencePoints[partName] = refPoint;
             }
         }
         
@@ -803,6 +867,7 @@ namespace ZundakaiTools {
             // 衣装のスキンメッシュレンダラーを取得
             SkinnedMeshRenderer[] costumeRenderers = costumeInstance.GetComponentsInChildren<SkinnedMeshRenderer>(true);
             
+            // 各メッシュレンダラーごとに処理
             foreach (SkinnedMeshRenderer costumeRenderer in costumeRenderers) {
                 if (costumeRenderer == null || costumeRenderer.sharedMesh == null) continue;
                 
@@ -817,10 +882,10 @@ namespace ZundakaiTools {
                 // メッシュのボディパーツを特定
                 string partName = IdentifyBodyPart(costumeRenderer);
                 
-                // 対応するアバターのメッシュを見つける
-                if (avatarMeshes.ContainsKey(partName)) {
-                    // アバターのメッシュに合わせて衣装のメッシュを変形
-                    DeformMeshToMatch(costumeRenderer.sharedMesh, avatarMeshes[partName]);
+                // 部位ごとに適切なアバターメッシュに合わせて変形
+                if (avatarReferencePoints.ContainsKey(partName)) {
+                    // 頂点ごとに調整
+                    DeformMeshToMatchByPart(costumeRenderer.sharedMesh, partName, avatarReferencePoints[partName]);
                 }
                 
                 // バウンディングボックスの更新
@@ -832,55 +897,84 @@ namespace ZundakaiTools {
             }
         }
         
-        // アバターのメッシュに合わせて衣装のメッシュを変形
-        private void DeformMeshToMatch(Mesh costumeMesh, Mesh avatarMesh) {
-            if (costumeMesh == null || avatarMesh == null) return;
+        // 部位ごとにメッシュを変形
+        private void DeformMeshToMatchByPart(Mesh costumeMesh, string partName, ReferencePoint avatarRefPoint) {
+            if (costumeMesh == null) return;
             
             // メッシュの頂点を取得
             Vector3[] costumeVertices = costumeMesh.vertices;
-            Vector3[] avatarVertices = avatarMesh.vertices;
+            if (costumeVertices.Length == 0) return;
             
-            if (costumeVertices.Length == 0 || avatarVertices.Length == 0) return;
-            
-            // 衣装メッシュとアバターメッシュのスケールを計算
+            // 現在のバウンディングボックスを計算
             Bounds costumeBounds = costumeMesh.bounds;
-            Bounds avatarBounds = avatarMesh.bounds;
             
-            // スケール比率を計算
-            Vector3 scaleRatio = new Vector3(
-                avatarBounds.size.x / costumeBounds.size.x,
-                avatarBounds.size.y / costumeBounds.size.y,
-                avatarBounds.size.z / costumeBounds.size.z
-            );
-            
-            // 衣装メッシュの頂点を調整
+            // 頂点ごとに部位に応じた変形を適用
             for (int i = 0; i < costumeVertices.Length; i++) {
-                // 頂点位置をメッシュのローカル空間で正規化
+                // 頂点の相対位置を計算（-1～1の範囲）
                 Vector3 normalizedPos = (costumeVertices[i] - costumeBounds.center);
-                normalizedPos.x /= costumeBounds.size.x;
-                normalizedPos.y /= costumeBounds.size.y;
-                normalizedPos.z /= costumeBounds.size.z;
+                normalizedPos.x /= (costumeBounds.size.x * 0.5f);
+                normalizedPos.y /= (costumeBounds.size.y * 0.5f);
+                normalizedPos.z /= (costumeBounds.size.z * 0.5f);
                 
-                // 正規化された座標をアバターメッシュのサイズに再スケール
-                Vector3 newPos = new Vector3(
-                    normalizedPos.x * avatarBounds.size.x,
-                    normalizedPos.y * avatarBounds.size.y,
-                    normalizedPos.z * avatarBounds.size.z
-                );
-                
-                // アバターメッシュのローカル座標系に戻す
-                newPos += avatarBounds.center;
-                
-                // 頂点位置を更新
-                costumeVertices[i] = newPos;
+                // 部位ごとの適切なスケーリングを行う
+                switch (partName) {
+                    case "頭":
+                        // 頭部の調整（頭の形に合わせて変形）
+                        costumeVertices[i] = DeformVertex(normalizedPos, avatarRefPoint, costumeBounds, 1.0f, 1.0f, 1.0f);
+                        break;
+                        
+                    case "胴体":
+                        // 胴体の調整（胴体の形に合わせて変形）
+                        costumeVertices[i] = DeformVertex(normalizedPos, avatarRefPoint, costumeBounds, 1.0f, 1.0f, 1.0f);
+                        break;
+                        
+                    case "左腕":
+                        // 左腕の調整（左腕の形に合わせて変形）
+                        costumeVertices[i] = DeformVertex(normalizedPos, avatarRefPoint, costumeBounds, 1.0f, 1.0f, 1.0f);
+                        break;
+                        
+                    case "右腕":
+                        // 右腕の調整（右腕の形に合わせて変形）
+                        costumeVertices[i] = DeformVertex(normalizedPos, avatarRefPoint, costumeBounds, 1.0f, 1.0f, 1.0f);
+                        break;
+                        
+                    case "左脚":
+                        // 左脚の調整（左脚の形に合わせて変形）
+                        costumeVertices[i] = DeformVertex(normalizedPos, avatarRefPoint, costumeBounds, 1.0f, 1.0f, 1.0f);
+                        break;
+                        
+                    case "右脚":
+                        // 右脚の調整（右脚の形に合わせて変形）
+                        costumeVertices[i] = DeformVertex(normalizedPos, avatarRefPoint, costumeBounds, 1.0f, 1.0f, 1.0f);
+                        break;
+                        
+                    default:
+                        // その他の部位（基本的な変形のみ）
+                        costumeVertices[i] = DeformVertex(normalizedPos, avatarRefPoint, costumeBounds, 1.0f, 1.0f, 1.0f);
+                        break;
+                }
             }
             
             // 頂点位置の更新を適用
             costumeMesh.vertices = costumeVertices;
+        }
+        
+        // 頂点を変形する処理
+        private Vector3 DeformVertex(Vector3 normalizedPos, ReferencePoint refPoint, Bounds originalBounds, float xStrength, float yStrength, float zStrength) {
+            // アバターの参照点に基づいて変形
+            Vector3 targetSize = refPoint.extents * 2.0f; // アバターの部位サイズ
             
-            // メッシュの再計算
-            costumeMesh.RecalculateBounds();
-            costumeMesh.RecalculateNormals();
+            // 正規化座標をアバターのサイズに合わせて変形
+            Vector3 newPos = new Vector3(
+                normalizedPos.x * targetSize.x * 0.5f * xStrength,
+                normalizedPos.y * targetSize.y * 0.5f * yStrength,
+                normalizedPos.z * targetSize.z * 0.5f * zStrength
+            );
+            
+            // アバターの部位の中心に頂点を配置
+            newPos += refPoint.center;
+            
+            return newPos;
         }
         
         private void TransferSkinnedMeshes(Animator avatarAnimator, GameObject costumeInstance) {
