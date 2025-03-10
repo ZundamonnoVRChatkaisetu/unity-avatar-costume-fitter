@@ -34,7 +34,7 @@ namespace ZundakaiTools {
         private Dictionary<Transform, Transform> boneCorrespondence;
         private GameObject correspondenceTarget;
         
-        [MenuItem("ずん解/ボーン階層ビューア")]
+        // メニュー項目を削除（内部からのみ利用可能）
         public static void ShowWindow() {
             GetWindow<BoneHierarchyVisualizer>("ボーン階層ビューア");
         }
