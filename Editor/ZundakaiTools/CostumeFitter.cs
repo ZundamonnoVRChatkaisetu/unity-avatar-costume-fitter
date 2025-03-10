@@ -21,6 +21,12 @@ namespace ZundakaiTools {
         private bool createBlendShapes = false;
         private bool adjustSkinWeights = true;
         private bool autoScale = true;
+        private bool adjustByMesh = false; // メッシュで調整するオプション
+        
+        // メッシュ情報
+        private Dictionary<string, Mesh> avatarMeshes = new Dictionary<string, Mesh>();
+        private Dictionary<string, Mesh> costumeMeshes = new Dictionary<string, Mesh>();
+        private Dictionary<string, string> meshPartMapping = new Dictionary<string, string>();
         
         // About情報
         private bool showAboutInfo = false;
@@ -49,6 +55,16 @@ namespace ZundakaiTools {
         
         // 除外キーワード
         private readonly string[] exclusionKeywords = {"wing", "tail", "eye", "ear", "hair", "tongue", "jaw"};
+        
+        // ボディパーツ識別キーワード
+        private readonly Dictionary<string, string[]> bodyPartKeywords = new Dictionary<string, string[]>() {
+            { "頭", new string[] { "head", "face", "顔", "頭" } },
+            { "胴体", new string[] { "body", "chest", "torso", "trunk", "spine", "胴", "胸", "体" } },
+            { "左腕", new string[] { "leftarm", "left_arm", "l_arm", "左腕", "左手", "larm" } },
+            { "右腕", new string[] { "rightarm", "right_arm", "r_arm", "右腕", "右手", "rarm" } },
+            { "左脚", new string[] { "leftleg", "left_leg", "l_leg", "左脚", "左足", "lleg" } },
+            { "右脚", new string[] { "rightleg", "right_leg", "r_leg", "右脚", "右足", "rleg" } }
+        };
         
         [MenuItem("ずん解/衣装調整ツール")]
         public static void ShowWindow() {
@@ -141,6 +157,11 @@ namespace ZundakaiTools {
                 
                 // ボーンリストを更新
                 UpdateBoneLists();
+                
+                // アバターのメッシュ情報を解析
+                if (avatarObject != null) {
+                    AnalyzeAvatarMeshes();
+                }
             }
             
             // ドラッグアンドドロップのヒント
@@ -155,6 +176,11 @@ namespace ZundakaiTools {
                 
                 // ボーンリストを更新
                 UpdateBoneLists();
+                
+                // 衣装のメッシュ情報を解析
+                if (costumeObject != null) {
+                    AnalyzeCostumeMeshes();
+                }
             }
             
             // ドラッグアンドドロップのヒント
@@ -179,6 +205,15 @@ namespace ZundakaiTools {
                 autoScale = EditorGUILayout.Toggle("自動サイズ調整", autoScale);
                 adjustSkinWeights = EditorGUILayout.Toggle("ウェイト最適化", adjustSkinWeights);
                 createBlendShapes = EditorGUILayout.Toggle("ブレンドシェイプ作成", createBlendShapes);
+                
+                // メッシュで調整オプションを追加
+                bool prevAdjustByMesh = adjustByMesh;
+                adjustByMesh = EditorGUILayout.Toggle("メッシュで調整", adjustByMesh);
+                
+                // オプションの変更がある場合は説明を表示
+                if (adjustByMesh != prevAdjustByMesh && adjustByMesh) {
+                    EditorGUILayout.HelpBox("メッシュで調整: ボーンマッピングの代わりにメッシュ形状を使って衣装を調整します。アバターのメッシュ形状に合わせて衣装のメッシュを変形します。", MessageType.Info);
+                }
                 
                 EditorGUILayout.EndVertical();
             }
@@ -208,6 +243,114 @@ namespace ZundakaiTools {
                 Event.current.type == EventType.KeyDown) {
                 Repaint();
             }
+        }
+        
+        // アバターのメッシュを解析
+        private void AnalyzeAvatarMeshes() {
+            avatarMeshes.Clear();
+            
+            if (avatarObject == null) return;
+            
+            SkinnedMeshRenderer[] renderers = avatarObject.GetComponentsInChildren<SkinnedMeshRenderer>();
+            foreach (SkinnedMeshRenderer renderer in renderers) {
+                if (renderer.sharedMesh == null) continue;
+                
+                string partName = IdentifyBodyPart(renderer);
+                avatarMeshes[partName] = renderer.sharedMesh;
+                
+                // デバッグ情報
+                Debug.Log($"アバターメッシュを検出: {renderer.name} → {partName}");
+            }
+        }
+        
+        // 衣装のメッシュを解析
+        private void AnalyzeCostumeMeshes() {
+            costumeMeshes.Clear();
+            meshPartMapping.Clear();
+            
+            if (costumeObject == null) return;
+            
+            SkinnedMeshRenderer[] renderers = costumeObject.GetComponentsInChildren<SkinnedMeshRenderer>();
+            foreach (SkinnedMeshRenderer renderer in renderers) {
+                if (renderer.sharedMesh == null) continue;
+                
+                string partName = IdentifyBodyPart(renderer);
+                costumeMeshes[renderer.name] = renderer.sharedMesh;
+                meshPartMapping[renderer.name] = partName;
+                
+                // デバッグ情報
+                Debug.Log($"衣装メッシュを検出: {renderer.name} → {partName}");
+            }
+        }
+        
+        // メッシュのボディパーツを特定
+        private string IdentifyBodyPart(SkinnedMeshRenderer renderer) {
+            string objName = renderer.name.ToLowerInvariant();
+            string defaultPart = "その他";
+            
+            // メッシュ名やオブジェクト名、ボーン情報をもとに部位を推定
+            foreach (var part in bodyPartKeywords) {
+                foreach (string keyword in part.Value) {
+                    if (objName.Contains(keyword)) {
+                        return part.Key;
+                    }
+                }
+            }
+            
+            // ボーン情報からも推定を試みる
+            if (renderer.bones != null && renderer.bones.Length > 0) {
+                Dictionary<string, int> partCounts = new Dictionary<string, int>();
+                
+                foreach (var bone in renderer.bones) {
+                    if (bone == null) continue;
+                    
+                    string boneName = bone.name.ToLowerInvariant();
+                    
+                    foreach (var part in bodyPartKeywords) {
+                        foreach (string keyword in part.Value) {
+                            if (boneName.Contains(keyword)) {
+                                if (!partCounts.ContainsKey(part.Key)) {
+                                    partCounts[part.Key] = 0;
+                                }
+                                partCounts[part.Key]++;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // 最も多く関連付けられた部位を採用
+                if (partCounts.Count > 0) {
+                    return partCounts.OrderByDescending(x => x.Value).First().Key;
+                }
+            }
+            
+            // 頂点分布からも推定を試みる
+            if (renderer.sharedMesh != null) {
+                Vector3[] vertices = renderer.sharedMesh.vertices;
+                Vector3 center = Vector3.zero;
+                
+                foreach (Vector3 v in vertices) {
+                    center += v;
+                }
+                
+                if (vertices.Length > 0) {
+                    center /= vertices.Length;
+                    
+                    // 位置に基づく簡易的な判定
+                    if (center.y > 1.5f) return "頭";
+                    if (center.y < 0.5f) {
+                        if (center.x < -0.2f) return "左脚";
+                        if (center.x > 0.2f) return "右脚";
+                        return "胴体";
+                    }
+                    if (center.x < -0.3f) return "左腕";
+                    if (center.x > 0.3f) return "右腕";
+                    return "胴体";
+                }
+            }
+            
+            return defaultPart;
         }
         
         // ボーンマッピングUI
@@ -636,8 +779,14 @@ namespace ZundakaiTools {
                 );
             }
             
-            // スキンメッシュの転送（ボーンのバインド）
-            TransferSkinnedMeshes(avatarAnimator, activeCostumeInstance);
+            // メッシュで調整オプションに基づいて処理を分岐
+            if (adjustByMesh) {
+                // メッシュベースで衣装を適合させる
+                AdjustCostumeByMesh(avatarAnimator, activeCostumeInstance);
+            } else {
+                // 従来のスキンメッシュの転送（ボーンのバインド）
+                TransferSkinnedMeshes(avatarAnimator, activeCostumeInstance);
+            }
             
             // 初期の微調整値を設定
             SetupAdjustmentValues();
@@ -647,6 +796,91 @@ namespace ZundakaiTools {
             SceneView.RepaintAll();
             
             Debug.Log("衣装の適用が完了しました");
+        }
+        
+        // メッシュベースで衣装を調整
+        private void AdjustCostumeByMesh(Animator avatarAnimator, GameObject costumeInstance) {
+            // 衣装のスキンメッシュレンダラーを取得
+            SkinnedMeshRenderer[] costumeRenderers = costumeInstance.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            
+            foreach (SkinnedMeshRenderer costumeRenderer in costumeRenderers) {
+                if (costumeRenderer == null || costumeRenderer.sharedMesh == null) continue;
+                
+                // オリジナルのメッシュを保存
+                if (!originalMeshes.ContainsKey(costumeRenderer)) {
+                    originalMeshes[costumeRenderer] = costumeRenderer.sharedMesh;
+                    
+                    // 編集用のメッシュを複製
+                    costumeRenderer.sharedMesh = Instantiate(costumeRenderer.sharedMesh);
+                }
+                
+                // メッシュのボディパーツを特定
+                string partName = IdentifyBodyPart(costumeRenderer);
+                
+                // 対応するアバターのメッシュを見つける
+                if (avatarMeshes.ContainsKey(partName)) {
+                    // アバターのメッシュに合わせて衣装のメッシュを変形
+                    DeformMeshToMatch(costumeRenderer.sharedMesh, avatarMeshes[partName]);
+                }
+                
+                // バウンディングボックスの更新
+                costumeRenderer.sharedMesh.RecalculateBounds();
+                costumeRenderer.sharedMesh.RecalculateNormals();
+                
+                // 更新を強制
+                EditorUpdateHelper.ForceUpdate(costumeRenderer);
+            }
+        }
+        
+        // アバターのメッシュに合わせて衣装のメッシュを変形
+        private void DeformMeshToMatch(Mesh costumeMesh, Mesh avatarMesh) {
+            if (costumeMesh == null || avatarMesh == null) return;
+            
+            // メッシュの頂点を取得
+            Vector3[] costumeVertices = costumeMesh.vertices;
+            Vector3[] avatarVertices = avatarMesh.vertices;
+            
+            if (costumeVertices.Length == 0 || avatarVertices.Length == 0) return;
+            
+            // 衣装メッシュとアバターメッシュのスケールを計算
+            Bounds costumeBounds = costumeMesh.bounds;
+            Bounds avatarBounds = avatarMesh.bounds;
+            
+            // スケール比率を計算
+            Vector3 scaleRatio = new Vector3(
+                avatarBounds.size.x / costumeBounds.size.x,
+                avatarBounds.size.y / costumeBounds.size.y,
+                avatarBounds.size.z / costumeBounds.size.z
+            );
+            
+            // 衣装メッシュの頂点を調整
+            for (int i = 0; i < costumeVertices.Length; i++) {
+                // 頂点位置をメッシュのローカル空間で正規化
+                Vector3 normalizedPos = (costumeVertices[i] - costumeBounds.center);
+                normalizedPos.x /= costumeBounds.size.x;
+                normalizedPos.y /= costumeBounds.size.y;
+                normalizedPos.z /= costumeBounds.size.z;
+                
+                // 正規化された座標をアバターメッシュのサイズに再スケール
+                Vector3 newPos = new Vector3(
+                    normalizedPos.x * avatarBounds.size.x,
+                    normalizedPos.y * avatarBounds.size.y,
+                    normalizedPos.z * avatarBounds.size.z
+                );
+                
+                // アバターメッシュのローカル座標系に戻す
+                newPos += avatarBounds.center;
+                
+                // 頂点位置を更新
+                costumeVertices[i] = newPos;
+            }
+            
+            // 頂点位置の更新を適用
+            costumeMesh.vertices = costumeVertices;
+            
+            // メッシュの再計算
+            costumeMesh.RecalculateBounds();
+            costumeMesh.RecalculateNormals();
         }
         
         private void TransferSkinnedMeshes(Animator avatarAnimator, GameObject costumeInstance) {
