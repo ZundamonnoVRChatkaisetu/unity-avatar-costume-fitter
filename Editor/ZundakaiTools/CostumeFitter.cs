@@ -11,6 +11,7 @@ namespace ZundakaiTools {
         
         // 微調整用の設定
         private Dictionary<string, float> adjustmentValues = new Dictionary<string, float>();
+        private Dictionary<string, float> prevAdjustmentValues = new Dictionary<string, float>();
         private Vector2 scrollPosition;
         private bool showAdjustments = false;
         
@@ -22,7 +23,16 @@ namespace ZundakaiTools {
         
         // About情報
         private bool showAboutInfo = false;
-        private string aboutInfo = "全アバター衣装自動調整ツール\nVersion 1.0\n\n衣装をアバターに自動的に合わせるツールです。\n\n使い方：\n1. アバターと衣装をドラッグ＆ドロップで選択\n2. 「衣装を着せる」ボタンをクリック\n3. 微調整バーで細かい調整を行う";
+        private string aboutInfo = "全アバター衣装自動調整ツール\nVersion 1.1\n\n衣装をアバターに自動的に合わせるツールです。\n\n使い方：\n1. アバターと衣装をドラッグ＆ドロップで選択\n2. 「衣装を着せる」ボタンをクリック\n3. 微調整バーで細かい調整を行う";
+        
+        // メッシュキャッシュ（リアルタイム調整用）
+        private Dictionary<SkinnedMeshRenderer, Mesh> originalMeshes = new Dictionary<SkinnedMeshRenderer, Mesh>();
+        
+        // アバターのボーンマッピング
+        private Dictionary<string, Transform> avatarBoneMapping;
+        
+        // エディタ更新時間
+        private double lastUpdateTime;
         
         [MenuItem("ずん解/衣装調整ツール")]
         public static void ShowWindow() {
@@ -32,6 +42,55 @@ namespace ZundakaiTools {
         private void OnEnable() {
             // ウィンドウがフォーカスを得たときに実行
             wantsMouseMove = true;
+            lastUpdateTime = EditorApplication.timeSinceStartup;
+            
+            // エディタ更新イベントに登録
+            EditorApplication.update += OnEditorUpdate;
+        }
+        
+        private void OnDisable() {
+            // ウィンドウが閉じられるときの処理
+            EditorApplication.update -= OnEditorUpdate;
+            
+            // 元のメッシュに戻す
+            RestoreOriginalMeshes();
+        }
+        
+        private void OnEditorUpdate() {
+            // 現在の時間
+            double currentTime = EditorApplication.timeSinceStartup;
+            
+            // 前回の更新から0.1秒経過したら更新
+            if (currentTime - lastUpdateTime > 0.1) {
+                // 微調整値に変更があれば適用
+                if (showAdjustments && HasAdjustmentValuesChanged()) {
+                    ApplyAdjustments();
+                }
+                
+                // 時間を更新
+                lastUpdateTime = currentTime;
+            }
+        }
+        
+        // 微調整値に変更があるかチェック
+        private bool HasAdjustmentValuesChanged() {
+            foreach (var key in adjustmentValues.Keys) {
+                if (!prevAdjustmentValues.ContainsKey(key) || 
+                    !Mathf.Approximately(prevAdjustmentValues[key], adjustmentValues[key])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        
+        // 元のメッシュを復元
+        private void RestoreOriginalMeshes() {
+            foreach (var pair in originalMeshes) {
+                if (pair.Key != null && pair.Value != null) {
+                    pair.Key.sharedMesh = pair.Value;
+                }
+            }
+            originalMeshes.Clear();
         }
         
         private void OnGUI() {
@@ -57,6 +116,9 @@ namespace ZundakaiTools {
                 avatarObject = newAvatarObject;
                 // アバターが変更された場合、既存の衣装を削除
                 RemoveCurrentCostume();
+                
+                // アバターのボーンマッピングを更新
+                UpdateAvatarBoneMapping();
             }
             
             // ドラッグアンドドロップのヒント
@@ -101,6 +163,28 @@ namespace ZundakaiTools {
             if (showAdjustments) {
                 DrawAdjustmentControls();
             }
+            
+            // マウス操作やキーボード操作があった場合、再描画をリクエスト
+            if (Event.current.type == EventType.MouseMove || 
+                Event.current.type == EventType.KeyDown) {
+                Repaint();
+            }
+        }
+        
+        // アバターのボーンマッピングを更新
+        private void UpdateAvatarBoneMapping() {
+            if (avatarObject == null) {
+                avatarBoneMapping = null;
+                return;
+            }
+            
+            Animator avatarAnimator = avatarObject.GetComponent<Animator>();
+            if (avatarAnimator == null || !avatarAnimator.isHuman) {
+                avatarBoneMapping = null;
+                return;
+            }
+            
+            avatarBoneMapping = AvatarUtility.GetAvatarBoneMapping(avatarAnimator);
         }
         
         // 既存の衣装を削除
@@ -110,6 +194,9 @@ namespace ZundakaiTools {
                 activeCostumeInstance = null;
                 showAdjustments = false;
             }
+            
+            // オリジナルメッシュを復元
+            RestoreOriginalMeshes();
         }
         
         private void FitCostume() {
@@ -124,6 +211,9 @@ namespace ZundakaiTools {
                 Debug.LogError("選択されたアバターはHumanoidアバターではありません");
                 return;
             }
+            
+            // アバターのボーンマッピングを更新
+            UpdateAvatarBoneMapping();
             
             // 既存の衣装インスタンスがある場合は削除
             RemoveCurrentCostume();
@@ -173,11 +263,16 @@ namespace ZundakaiTools {
             SkinnedMeshRenderer[] costumeRenderers = costumeInstance.GetComponentsInChildren<SkinnedMeshRenderer>(true);
             
             foreach (SkinnedMeshRenderer costumeRenderer in costumeRenderers) {
-                // コピーを作成して作業する
-                SkinnedMeshRenderer rendererCopy = costumeRenderer;
+                // オリジナルのメッシュを保存
+                if (costumeRenderer.sharedMesh != null && !originalMeshes.ContainsKey(costumeRenderer)) {
+                    originalMeshes[costumeRenderer] = costumeRenderer.sharedMesh;
+                    
+                    // 編集用のメッシュを複製
+                    costumeRenderer.sharedMesh = Instantiate(costumeRenderer.sharedMesh);
+                }
                 
                 // オリジナルのボーン配列を保存
-                Transform[] originalBones = rendererCopy.bones;
+                Transform[] originalBones = costumeRenderer.bones;
                 
                 // 新しいボーン配列（アバターのボーンに対応）
                 Transform[] newBones = new Transform[originalBones.Length];
@@ -191,11 +286,8 @@ namespace ZundakaiTools {
                     
                     string boneName = originalBones[i].name;
                     
-                    // アバターにある同名のボーンを検索 (ユーティリティクラスを使用)
-                    Transform avatarBone = AvatarUtility.GetHumanoidBone(avatarAnimator, boneName);
-                    if (avatarBone == null) {
-                        avatarBone = FindBoneInAvatar(avatarAnimator, boneName);
-                    }
+                    // マッピングテーブルから対応するボーンを取得
+                    Transform avatarBone = FindCorrespondingAvatarBone(avatarAnimator, boneName, originalBones[i]);
                     
                     if (avatarBone != null) {
                         newBones[i] = avatarBone;
@@ -221,42 +313,83 @@ namespace ZundakaiTools {
                 }
                 
                 // 新しいボーン配列を適用
-                rendererCopy.bones = newBones;
+                costumeRenderer.bones = newBones;
                 
                 // ルートボーンをアバターの対応するボーンに設定
-                if (rendererCopy.rootBone != null) {
-                    string rootBoneName = rendererCopy.rootBone.name;
-                    Transform avatarRootBone = AvatarUtility.GetHumanoidBone(avatarAnimator, rootBoneName);
-                    if (avatarRootBone == null) {
-                        avatarRootBone = FindBoneInAvatar(avatarAnimator, rootBoneName);
-                    }
+                if (costumeRenderer.rootBone != null) {
+                    string rootBoneName = costumeRenderer.rootBone.name;
+                    Transform avatarRootBone = FindCorrespondingAvatarBone(avatarAnimator, rootBoneName, costumeRenderer.rootBone);
                     
                     if (avatarRootBone != null) {
-                        rendererCopy.rootBone = avatarRootBone;
+                        costumeRenderer.rootBone = avatarRootBone;
                     } else {
                         // ルートボーンが見つからない場合は、Hipsなど主要なボーンを代わりに使用
-                        rendererCopy.rootBone = avatarAnimator.GetBoneTransform(HumanBodyBones.Hips);
+                        costumeRenderer.rootBone = avatarAnimator.GetBoneTransform(HumanBodyBones.Hips);
                     }
                 }
                 
                 // オプション：スキンウェイトの最適化
                 if (adjustSkinWeights) {
-                    AvatarUtility.AdjustSkinWeights(rendererCopy);
+                    AvatarUtility.AdjustSkinWeights(costumeRenderer);
                 }
                 
                 // オプション：ブレンドシェイプの作成
                 if (createBlendShapes) {
-                    AvatarUtility.CreateBasicBlendShapes(rendererCopy);
+                    AvatarUtility.CreateBasicBlendShapes(costumeRenderer);
                 }
                 
                 // バウンディングボックスの更新
-                if (rendererCopy.sharedMesh != null) {
-                    rendererCopy.sharedMesh.RecalculateBounds();
+                if (costumeRenderer.sharedMesh != null) {
+                    costumeRenderer.sharedMesh.RecalculateBounds();
                 }
                 
                 // 更新を強制
-                EditorUpdateHelper.ForceUpdate(rendererCopy);
+                EditorUpdateHelper.ForceUpdate(costumeRenderer);
             }
+        }
+        
+        // 対応するアバターのボーンを見つける（改良版）
+        private Transform FindCorrespondingAvatarBone(Animator avatarAnimator, string boneName, Transform originalBone) {
+            // 1. 名前が完全に一致する場合
+            if (avatarBoneMapping != null && avatarBoneMapping.TryGetValue(boneName, out Transform exactMatch)) {
+                return exactMatch;
+            }
+            
+            // 2. 正規化された名前で検索
+            string normalizedName = AvatarUtility.NormalizeBoneName(boneName);
+            if (avatarBoneMapping != null && avatarBoneMapping.TryGetValue(normalizedName, out Transform normalizedMatch)) {
+                return normalizedMatch;
+            }
+            
+            // 3. ヒューマノイドボーンから推定
+            Transform humanoidMatch = AvatarUtility.GetHumanoidBone(avatarAnimator, boneName);
+            if (humanoidMatch != null) {
+                return humanoidMatch;
+            }
+            
+            // 4. 位置ベースのマッピング（最終手段）
+            if (originalBone != null) {
+                // ボーンの相対位置を計算
+                Vector3 localPos = originalBone.localPosition;
+                float distance = float.MaxValue;
+                Transform bestMatch = null;
+                
+                // アバターのすべてのボーンから最も近い位置のものを探す
+                foreach (var bone in avatarAnimator.transform.GetComponentsInChildren<Transform>()) {
+                    float currentDist = Vector3.Distance(bone.localPosition, localPos);
+                    if (currentDist < distance) {
+                        distance = currentDist;
+                        bestMatch = bone;
+                    }
+                }
+                
+                if (bestMatch != null) {
+                    return bestMatch;
+                }
+            }
+            
+            // それでも見つからない場合は標準的な検索を試す
+            return FindBoneInAvatar(avatarAnimator, boneName);
         }
         
         private Transform FindBoneInAvatar(Animator avatarAnimator, string boneName) {
@@ -291,6 +424,7 @@ namespace ZundakaiTools {
         
         private void SetupAdjustmentValues() {
             adjustmentValues.Clear();
+            prevAdjustmentValues.Clear();
             
             // 代表的な部位の調整値を初期化
             adjustmentValues["全体スケール"] = 1.0f;
@@ -312,6 +446,11 @@ namespace ZundakaiTools {
             adjustmentValues["腹部_X"] = 0.0f;
             adjustmentValues["腹部_Y"] = 0.0f;
             adjustmentValues["腹部_Z"] = 0.0f;
+            
+            // 現在の値を保存
+            foreach (var key in adjustmentValues.Keys) {
+                prevAdjustmentValues[key] = adjustmentValues[key];
+            }
         }
         
         private void DrawAdjustmentControls() {
@@ -340,14 +479,8 @@ namespace ZundakaiTools {
                     } else {
                         adjustmentValues[key] = 0.0f;
                     }
-                    ApplyAdjustments();
                 }
                 EditorGUILayout.EndHorizontal();
-                
-                // 値が変わったら自動的に適用する
-                if (prevValue != adjustmentValues[key]) {
-                    ApplyAdjustments();
-                }
             }
             
             EditorGUILayout.EndScrollView();
@@ -356,35 +489,136 @@ namespace ZundakaiTools {
             
             // 調整を適用するボタン
             if (GUILayout.Button("調整を適用", GUILayout.Height(30))) {
-                ApplyAdjustments();
+                ApplyAdjustmentsWithRebuild();
             }
             
             EditorGUILayout.EndVertical();
         }
         
+        // 小さな変更用の軽量な調整適用（リアルタイム用）
         private void ApplyAdjustments() {
             if (avatarObject == null || activeCostumeInstance == null) {
-                Debug.LogError("アバターまたは衣装が見つかりません");
                 return;
             }
             
             Animator avatarAnimator = avatarObject.GetComponent<Animator>();
             if (avatarAnimator == null) return;
             
+            try {
+                // 全体スケールの適用
+                float globalScale = adjustmentValues["全体スケール"];
+                Vector3 currentScale = activeCostumeInstance.transform.localScale;
+                float uniformScale = (currentScale.x + currentScale.y + currentScale.z) / 3.0f;
+                
+                // スケールが0でないことを確認
+                if (uniformScale < 0.001f) uniformScale = 1.0f;
+                
+                float scaleRatio = globalScale / uniformScale;
+                activeCostumeInstance.transform.localScale = new Vector3(
+                    currentScale.x * scaleRatio,
+                    currentScale.y * scaleRatio,
+                    currentScale.z * scaleRatio
+                );
+                
+                // アバターのボーンを取得
+                Transform upperBody = avatarAnimator.GetBoneTransform(HumanBodyBones.Chest) ?? 
+                                   avatarAnimator.GetBoneTransform(HumanBodyBones.Spine);
+                
+                Transform lowerBody = avatarAnimator.GetBoneTransform(HumanBodyBones.Hips);
+                Transform chest = avatarAnimator.GetBoneTransform(HumanBodyBones.UpperChest) ?? 
+                               avatarAnimator.GetBoneTransform(HumanBodyBones.Chest);
+                Transform spine = avatarAnimator.GetBoneTransform(HumanBodyBones.Spine);
+                
+                // すべてのSkinnedMeshRendererを取得
+                SkinnedMeshRenderer[] renderers = activeCostumeInstance.GetComponentsInChildren<SkinnedMeshRenderer>();
+                
+                // 各ボーンに対応する部分を一時的に修正
+                foreach (SkinnedMeshRenderer renderer in renderers) {
+                    if (renderer == null || renderer.sharedMesh == null) continue;
+                    
+                    // 上半身の調整
+                    if (upperBody != null) {
+                        AvatarUtility.ModifyMeshTemporarily(renderer, 
+                            new Vector3(
+                                adjustmentValues["上半身_X"] - prevAdjustmentValues["上半身_X"],
+                                adjustmentValues["上半身_Y"] - prevAdjustmentValues["上半身_Y"],
+                                adjustmentValues["上半身_Z"] - prevAdjustmentValues["上半身_Z"]
+                            ), 
+                            upperBody.name);
+                    }
+                    
+                    // 下半身の調整
+                    if (lowerBody != null) {
+                        AvatarUtility.ModifyMeshTemporarily(renderer, 
+                            new Vector3(
+                                adjustmentValues["下半身_X"] - prevAdjustmentValues["下半身_X"],
+                                adjustmentValues["下半身_Y"] - prevAdjustmentValues["下半身_Y"],
+                                adjustmentValues["下半身_Z"] - prevAdjustmentValues["下半身_Z"]
+                            ), 
+                            lowerBody.name);
+                    }
+                    
+                    // 胸部の調整
+                    if (chest != null) {
+                        AvatarUtility.ModifyMeshTemporarily(renderer, 
+                            new Vector3(
+                                adjustmentValues["胸部_X"] - prevAdjustmentValues["胸部_X"],
+                                adjustmentValues["胸部_Y"] - prevAdjustmentValues["胸部_Y"],
+                                adjustmentValues["胸部_Z"] - prevAdjustmentValues["胸部_Z"]
+                            ), 
+                            chest.name);
+                    }
+                    
+                    // 腹部の調整
+                    if (spine != null) {
+                        AvatarUtility.ModifyMeshTemporarily(renderer, 
+                            new Vector3(
+                                adjustmentValues["腹部_X"] - prevAdjustmentValues["腹部_X"],
+                                adjustmentValues["腹部_Y"] - prevAdjustmentValues["腹部_Y"],
+                                adjustmentValues["腹部_Z"] - prevAdjustmentValues["腹部_Z"]
+                            ), 
+                            spine.name);
+                    }
+                    
+                    // メッシュを更新
+                    renderer.sharedMesh.RecalculateBounds();
+                }
+                
+                // 腕と脚のスケール調整
+                AdjustLimbScale(avatarAnimator, activeCostumeInstance, HumanBodyBones.LeftUpperArm, adjustmentValues["左腕_スケール"]);
+                AdjustLimbScale(avatarAnimator, activeCostumeInstance, HumanBodyBones.RightUpperArm, adjustmentValues["右腕_スケール"]);
+                AdjustLimbScale(avatarAnimator, activeCostumeInstance, HumanBodyBones.LeftUpperLeg, adjustmentValues["左脚_スケール"]);
+                AdjustLimbScale(avatarAnimator, activeCostumeInstance, HumanBodyBones.RightUpperLeg, adjustmentValues["右脚_スケール"]);
+                
+                // 現在の値を保存
+                foreach (var key in adjustmentValues.Keys) {
+                    prevAdjustmentValues[key] = adjustmentValues[key];
+                }
+                
+                // 強制的に更新
+                SceneView.RepaintAll();
+            }
+            catch (System.Exception e) {
+                Debug.LogError($"調整の適用中にエラーが発生しました: {e.Message}");
+            }
+        }
+        
+        // 完全な再構築を伴う調整適用（ボタン押下時用）
+        private void ApplyAdjustmentsWithRebuild() {
+            if (avatarObject == null || activeCostumeInstance == null) {
+                Debug.LogError("アバターまたは衣装が見つかりません");
+                return;
+            }
+            
+            // オリジナルのメッシュに戻す
+            RestoreOriginalMeshes();
+            
+            Animator avatarAnimator = avatarObject.GetComponent<Animator>();
+            if (avatarAnimator == null) return;
+            
             // 全体スケールの適用
             float globalScale = adjustmentValues["全体スケール"];
-            Vector3 currentScale = activeCostumeInstance.transform.localScale;
-            float uniformScale = (currentScale.x + currentScale.y + currentScale.z) / 3.0f;
-            
-            // スケールが0でないことを確認
-            if (uniformScale < 0.001f) uniformScale = 1.0f;
-            
-            float scaleRatio = globalScale / uniformScale;
-            activeCostumeInstance.transform.localScale = new Vector3(
-                currentScale.x * scaleRatio,
-                currentScale.y * scaleRatio,
-                currentScale.z * scaleRatio
-            );
+            activeCostumeInstance.transform.localScale = new Vector3(globalScale, globalScale, globalScale);
             
             // アバターのボーンを取得して部位ごとに調整
             Transform upperBody = avatarAnimator.GetBoneTransform(HumanBodyBones.Chest) ?? 
@@ -395,37 +629,50 @@ namespace ZundakaiTools {
                            avatarAnimator.GetBoneTransform(HumanBodyBones.Chest);
             Transform spine = avatarAnimator.GetBoneTransform(HumanBodyBones.Spine);
             
-            // 上半身の調整
-            if (upperBody != null) {
-                // 衣装の対応する部分を見つけて調整
-                AdjustCostumePart(activeCostumeInstance, upperBody.name, 
-                    adjustmentValues["上半身_X"], 
-                    adjustmentValues["上半身_Y"], 
-                    adjustmentValues["上半身_Z"]);
-            }
+            // 衣装のすべてのSkinnedMeshRenderer
+            SkinnedMeshRenderer[] renderers = activeCostumeInstance.GetComponentsInChildren<SkinnedMeshRenderer>();
             
-            // 下半身の調整
-            if (lowerBody != null) {
-                AdjustCostumePart(activeCostumeInstance, lowerBody.name, 
-                    adjustmentValues["下半身_X"], 
-                    adjustmentValues["下半身_Y"], 
-                    adjustmentValues["下半身_Z"]);
-            }
-            
-            // 胸部の調整
-            if (chest != null) {
-                AdjustCostumePart(activeCostumeInstance, chest.name, 
-                    adjustmentValues["胸部_X"], 
-                    adjustmentValues["胸部_Y"], 
-                    adjustmentValues["胸部_Z"]);
-            }
-            
-            // 腹部の調整
-            if (spine != null) {
-                AdjustCostumePart(activeCostumeInstance, spine.name, 
-                    adjustmentValues["腹部_X"], 
-                    adjustmentValues["腹部_Y"], 
-                    adjustmentValues["腹部_Z"]);
+            foreach (SkinnedMeshRenderer renderer in renderers) {
+                if (renderer == null || renderer.sharedMesh == null) continue;
+                
+                // メッシュを複製して編集可能にする
+                renderer.sharedMesh = Instantiate(renderer.sharedMesh);
+                
+                // 上半身の調整
+                if (upperBody != null) {
+                    AdjustCostumePart(renderer, upperBody.name, 
+                        adjustmentValues["上半身_X"], 
+                        adjustmentValues["上半身_Y"], 
+                        adjustmentValues["上半身_Z"]);
+                }
+                
+                // 下半身の調整
+                if (lowerBody != null) {
+                    AdjustCostumePart(renderer, lowerBody.name, 
+                        adjustmentValues["下半身_X"], 
+                        adjustmentValues["下半身_Y"], 
+                        adjustmentValues["下半身_Z"]);
+                }
+                
+                // 胸部の調整
+                if (chest != null) {
+                    AdjustCostumePart(renderer, chest.name, 
+                        adjustmentValues["胸部_X"], 
+                        adjustmentValues["胸部_Y"], 
+                        adjustmentValues["胸部_Z"]);
+                }
+                
+                // 腹部の調整
+                if (spine != null) {
+                    AdjustCostumePart(renderer, spine.name, 
+                        adjustmentValues["腹部_X"], 
+                        adjustmentValues["腹部_Y"], 
+                        adjustmentValues["腹部_Z"]);
+                }
+                
+                // バウンディングボックスを更新
+                renderer.sharedMesh.RecalculateBounds();
+                renderer.sharedMesh.RecalculateNormals();
             }
             
             // 腕と脚のスケール調整
@@ -434,133 +681,82 @@ namespace ZundakaiTools {
             AdjustLimbScale(avatarAnimator, activeCostumeInstance, HumanBodyBones.LeftUpperLeg, adjustmentValues["左脚_スケール"]);
             AdjustLimbScale(avatarAnimator, activeCostumeInstance, HumanBodyBones.RightUpperLeg, adjustmentValues["右脚_スケール"]);
             
+            // 現在の値を保存
+            foreach (var key in adjustmentValues.Keys) {
+                prevAdjustmentValues[key] = adjustmentValues[key];
+            }
+            
+            // オリジナルのメッシュリストをクリア（新しいメッシュを保存するため）
+            originalMeshes.Clear();
+            
             // 更新を強制
             EditorUpdateHelper.ForceUpdate(activeCostumeInstance);
             SceneView.RepaintAll();
             
-            Debug.Log("調整が適用されました");
+            Debug.Log("調整を完全に適用しました");
         }
         
-        private void AdjustCostumePart(GameObject costumeInstance, string boneName, float offsetX, float offsetY, float offsetZ) {
-            // 衣装内の対応するボーンとSkinnedMeshRendererを検索
-            List<SkinnedMeshRenderer> affectedRenderers = new List<SkinnedMeshRenderer>();
-            List<Transform> affectedBones = new List<Transform>();
+        private void AdjustCostumePart(SkinnedMeshRenderer renderer, string boneName, float offsetX, float offsetY, float offsetZ) {
+            if (renderer == null || renderer.sharedMesh == null) return;
             
-            // まず、直接の子ボーンを探す
-            Transform targetBone = FindChildByName(costumeInstance.transform, boneName);
-            if (targetBone != null) {
-                affectedBones.Add(targetBone);
-            }
+            // ボーンIDを特定
+            int targetBoneIndex = -1;
+            string normalizedBoneName = AvatarUtility.NormalizeBoneName(boneName).ToLowerInvariant();
             
-            // 次にボーン名を含むすべてのボーンを探す
-            foreach (Transform child in costumeInstance.GetComponentsInChildren<Transform>()) {
-                if (child.name.Contains(boneName) && !affectedBones.Contains(child)) {
-                    affectedBones.Add(child);
-                }
-            }
-            
-            // 最後に、すべてのSkinnedMeshRendererを検索し、ボーン名に対応するものを見つける
-            SkinnedMeshRenderer[] renderers = costumeInstance.GetComponentsInChildren<SkinnedMeshRenderer>();
-            foreach (SkinnedMeshRenderer renderer in renderers) {
-                bool affectsThisRenderer = false;
-                
-                // ボーンリストをチェック
-                for (int i = 0; i < renderer.bones.Length; i++) {
-                    if (renderer.bones[i] != null && renderer.bones[i].name.Contains(boneName)) {
-                        affectsThisRenderer = true;
+            for (int i = 0; i < renderer.bones.Length; i++) {
+                if (renderer.bones[i] != null) {
+                    string currentBoneName = AvatarUtility.NormalizeBoneName(renderer.bones[i].name).ToLowerInvariant();
+                    if (currentBoneName.Contains(normalizedBoneName) || normalizedBoneName.Contains(currentBoneName)) {
+                        targetBoneIndex = i;
                         break;
                     }
                 }
-                
-                if (affectsThisRenderer && !affectedRenderers.Contains(renderer)) {
-                    affectedRenderers.Add(renderer);
-                }
             }
             
-            // 見つからない場合は全てのSkinnedMeshRendererを対象にする
-            if (affectedRenderers.Count == 0) {
-                affectedRenderers.AddRange(renderers);
-            }
+            // メッシュを編集
+            Vector3[] vertices = renderer.sharedMesh.vertices;
+            BoneWeight[] weights = renderer.sharedMesh.boneWeights;
             
-            // 各SkinnedMeshRendererを調整
-            foreach (SkinnedMeshRenderer renderer in affectedRenderers) {
-                if (renderer.sharedMesh != null) {
-                    // メッシュを複製して編集可能にする（まだ複製されていない場合）
-                    Mesh sharedMesh = renderer.sharedMesh;
-                    Mesh newMesh = Object.Instantiate(sharedMesh);
-                    renderer.sharedMesh = newMesh;
+            if (targetBoneIndex >= 0 && weights.Length == vertices.Length) {
+                // 特定のボーンに関連する頂点だけを変更
+                for (int i = 0; i < vertices.Length; i++) {
+                    BoneWeight weight = weights[i];
+                    float influence = 0f;
                     
-                    // 複製したメッシュを変更
-                    Vector3[] vertices = newMesh.vertices;
+                    // 各ボーンのウェイトをチェック
+                    if (weight.boneIndex0 == targetBoneIndex) influence += weight.weight0;
+                    if (weight.boneIndex1 == targetBoneIndex) influence += weight.weight1;
+                    if (weight.boneIndex2 == targetBoneIndex) influence += weight.weight2;
+                    if (weight.boneIndex3 == targetBoneIndex) influence += weight.weight3;
                     
-                    // 各頂点にオフセットを適用
-                    for (int i = 0; i < vertices.Length; i++) {
-                        // ボーンの影響を受ける頂点のみを調整
-                        for (int j = 0; j < renderer.bones.Length; j++) {
-                            if (renderer.bones[j] != null && 
-                                (renderer.bones[j].name.Contains(boneName) || 
-                                affectedBones.Contains(renderer.bones[j]))) {
-                                
-                                vertices[i] += new Vector3(offsetX, offsetY, offsetZ);
-                                break;
-                            }
-                        }
+                    // ウェイトがある頂点のみオフセット
+                    if (influence > 0.01f) {
+                        vertices[i] += new Vector3(offsetX, offsetY, offsetZ) * influence;
                     }
-                    
-                    newMesh.vertices = vertices;
-                    newMesh.RecalculateBounds();
-                    newMesh.RecalculateNormals();
-                    
-                    // 更新を強制
-                    EditorUpdateHelper.ForceUpdate(renderer);
+                }
+            } else {
+                // ボーンが見つからない場合は、全ての頂点に小さなオフセットを適用
+                for (int i = 0; i < vertices.Length; i++) {
+                    vertices[i] += new Vector3(offsetX, offsetY, offsetZ) * 0.1f;
                 }
             }
+            
+            // 修正した頂点を適用
+            renderer.sharedMesh.vertices = vertices;
+            renderer.sharedMesh.RecalculateBounds();
         }
         
         private Transform FindChildByName(Transform parent, string name) {
+            if (parent.name.Contains(name)) {
+                return parent;
+            }
+            
             for (int i = 0; i < parent.childCount; i++) {
                 Transform child = parent.GetChild(i);
-                if (child.name.Contains(name)) {
-                    return child;
-                }
-                
                 Transform result = FindChildByName(child, name);
                 if (result != null) {
                     return result;
                 }
-            }
-            
-            return null;
-        }
-        
-        private Transform FindCostumePart(Transform costumeTransform, string boneName) {
-            // 正規化された名前で検索
-            string normalizedBoneName = AvatarUtility.NormalizeBoneName(boneName);
-            
-            // 名前で直接マッチするものを探す
-            foreach (Transform child in costumeTransform.GetComponentsInChildren<Transform>()) {
-                string normalizedChildName = AvatarUtility.NormalizeBoneName(child.name);
-                if (normalizedChildName.Contains(normalizedBoneName) || normalizedBoneName.Contains(normalizedChildName)) {
-                    return child;
-                }
-            }
-            
-            // SkinnedMeshRendererのボーンを探す
-            SkinnedMeshRenderer[] renderers = costumeTransform.GetComponentsInChildren<SkinnedMeshRenderer>();
-            foreach (SkinnedMeshRenderer renderer in renderers) {
-                for (int i = 0; i < renderer.bones.Length; i++) {
-                    if (renderer.bones[i] != null) {
-                        string normalizedRendererBoneName = AvatarUtility.NormalizeBoneName(renderer.bones[i].name);
-                        if (normalizedRendererBoneName.Contains(normalizedBoneName) || normalizedBoneName.Contains(normalizedRendererBoneName)) {
-                            return renderer.transform;
-                        }
-                    }
-                }
-            }
-            
-            // 見つからなかった場合は最初のSkinnedMeshRendererを返す
-            if (renderers.Length > 0) {
-                return renderers[0].transform;
             }
             
             return null;
@@ -571,35 +767,40 @@ namespace ZundakaiTools {
             if (avatarBone == null) return;
             
             // 衣装内の対応するボーンを検索
-            Transform costumeBone = FindCostumePart(costumeInstance.transform, avatarBone.name);
-            if (costumeBone != null) {
-                // スケールを適用
-                Vector3 currentScale = costumeBone.localScale;
-                float avgScale = (currentScale.x + currentScale.y + currentScale.z) / 3.0f;
-                
-                // スケールが0でないことを確認
-                if (avgScale < 0.001f) avgScale = 1.0f;
-                
-                float scaleRatio = scale / avgScale;
-                
-                costumeBone.localScale = new Vector3(
-                    currentScale.x * scaleRatio,
-                    currentScale.y * scaleRatio,
-                    currentScale.z * scaleRatio
-                );
-                
-                // 子のSkinnedMeshRendererも更新
-                SkinnedMeshRenderer[] renderers = costumeBone.GetComponentsInChildren<SkinnedMeshRenderer>();
-                foreach (SkinnedMeshRenderer renderer in renderers) {
-                    if (renderer.sharedMesh != null) {
-                        renderer.sharedMesh.RecalculateBounds();
-                    }
-                    
-                    // 更新を強制
-                    EditorUpdateHelper.ForceUpdate(renderer);
+            string normalizedName = AvatarUtility.NormalizeBoneName(avatarBone.name).ToLowerInvariant();
+            Transform costumeBone = null;
+            
+            // 階層から探す
+            foreach (Transform child in costumeInstance.GetComponentsInChildren<Transform>()) {
+                string childName = AvatarUtility.NormalizeBoneName(child.name).ToLowerInvariant();
+                if (childName.Contains(normalizedName) || normalizedName.Contains(childName)) {
+                    costumeBone = child;
+                    break;
                 }
+            }
+            
+            // SkinnedMeshRendererのボーンからも探す
+            if (costumeBone == null) {
+                SkinnedMeshRenderer[] renderers = costumeInstance.GetComponentsInChildren<SkinnedMeshRenderer>();
+                foreach (SkinnedMeshRenderer renderer in renderers) {
+                    for (int i = 0; i < renderer.bones.Length; i++) {
+                        if (renderer.bones[i] != null) {
+                            string boneName2 = AvatarUtility.NormalizeBoneName(renderer.bones[i].name).ToLowerInvariant();
+                            if (boneName2.Contains(normalizedName) || normalizedName.Contains(boneName2)) {
+                                costumeBone = renderer.bones[i];
+                                break;
+                            }
+                        }
+                    }
+                    if (costumeBone != null) break;
+                }
+            }
+            
+            // 発見したボーンにスケールを適用
+            if (costumeBone != null) {
+                costumeBone.localScale = new Vector3(scale, scale, scale);
                 
-                // Transformも更新
+                // 更新を強制
                 EditorUpdateHelper.ForceUpdate(costumeBone);
             }
         }
