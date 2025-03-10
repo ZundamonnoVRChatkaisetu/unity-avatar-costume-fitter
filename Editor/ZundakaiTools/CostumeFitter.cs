@@ -237,8 +237,9 @@ namespace ZundakaiTools {
             // マッピングテーブルのヘッダー
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField("アバターのボーン", EditorStyles.boldLabel, GUILayout.Width(180));
+            EditorGUILayout.LabelField("⇔", EditorStyles.boldLabel, GUILayout.Width(30));
             EditorGUILayout.LabelField("衣装のボーン", EditorStyles.boldLabel, GUILayout.Width(180));
-            EditorGUILayout.LabelField("対応状態", EditorStyles.boldLabel, GUILayout.Width(80));
+            EditorGUILayout.LabelField("状態", EditorStyles.boldLabel, GUILayout.Width(80));
             EditorGUILayout.LabelField("操作", EditorStyles.boldLabel, GUILayout.Width(60));
             EditorGUILayout.EndHorizontal();
             
@@ -274,6 +275,9 @@ namespace ZundakaiTools {
                     Selection.activeObject = avatarBone.gameObject;
                     EditorGUIUtility.PingObject(avatarBone.gameObject);
                 }
+                
+                // ⇔ 記号表示
+                EditorGUILayout.LabelField("⇔", GUILayout.Width(30));
                 
                 // 衣装ボーン選択ドロップダウン
                 Transform mappedBone = null;
@@ -444,22 +448,46 @@ namespace ZundakaiTools {
             
             // アバターのボーンを取得
             if (avatarObject != null) {
-                // すべてのボーンを取得
-                foreach (Transform bone in avatarObject.GetComponentsInChildren<Transform>()) {
-                    // 特定のキーワードを含むボーンは除外
-                    bool shouldExclude = false;
-                    foreach (string keyword in exclusionKeywords) {
-                        if (bone.name.ToLowerInvariant().Contains(keyword.ToLowerInvariant())) {
-                            shouldExclude = true;
-                            break;
+                // Armature配下のボーンのみを選択対象とする
+                Transform armatureTransform = FindArmatureTransform(avatarObject.transform);
+                
+                if (armatureTransform != null) {
+                    // Armature配下のすべてのボーンを取得
+                    foreach (Transform bone in armatureTransform.GetComponentsInChildren<Transform>()) {
+                        // 特定のキーワードを含むボーンは除外
+                        bool shouldExclude = false;
+                        foreach (string keyword in exclusionKeywords) {
+                            if (bone.name.ToLowerInvariant().Contains(keyword.ToLowerInvariant())) {
+                                shouldExclude = true;
+                                break;
+                            }
+                        }
+                        
+                        if (!shouldExclude) {
+                            avatarBones.Add(bone);
+                        } else {
+                            // 除外されたボーンを記録
+                            ignoredBones[bone] = true;
                         }
                     }
-                    
-                    if (!shouldExclude) {
-                        avatarBones.Add(bone);
-                    } else {
-                        // 除外されたボーンを記録
-                        ignoredBones[bone] = true;
+                } else {
+                    // Armatureが見つからない場合は従来の方法を使用
+                    foreach (Transform bone in avatarObject.GetComponentsInChildren<Transform>()) {
+                        // 特定のキーワードを含むボーンは除外
+                        bool shouldExclude = false;
+                        foreach (string keyword in exclusionKeywords) {
+                            if (bone.name.ToLowerInvariant().Contains(keyword.ToLowerInvariant())) {
+                                shouldExclude = true;
+                                break;
+                            }
+                        }
+                        
+                        if (!shouldExclude) {
+                            avatarBones.Add(bone);
+                        } else {
+                            // 除外されたボーンを記録
+                            ignoredBones[bone] = true;
+                        }
                     }
                 }
                 
@@ -510,6 +538,28 @@ namespace ZundakaiTools {
             // ボーンを階層順にソート
             avatarBones.Sort((a, b) => a.name.CompareTo(b.name));
             costumeBones.Sort((a, b) => a.name.CompareTo(b.name));
+        }
+        
+        // Armatureトランスフォームを探す
+        private Transform FindArmatureTransform(Transform root) {
+            // 直接「Armature」という名前のものを探す
+            if (root.name == "Armature") {
+                return root;
+            }
+            
+            // 子オブジェクトを再帰的に探索
+            foreach (Transform child in root) {
+                if (child.name == "Armature") {
+                    return child;
+                }
+                
+                Transform found = FindArmatureTransform(child);
+                if (found != null) {
+                    return found;
+                }
+            }
+            
+            return null; // 見つからなかった場合
         }
         
         // アバターのボーンマッピングを更新
