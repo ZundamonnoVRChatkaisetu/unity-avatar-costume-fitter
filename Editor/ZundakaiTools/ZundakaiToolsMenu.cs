@@ -3,7 +3,10 @@ using UnityEditor;
 
 namespace ZundakaiTools {
     public static class ZundakaiToolsMenu {
-        // ツールバーにメニューを追加
-        // About情報は削除（ツール内部に表示するため）
+        // 衣装調整ツールのみを表示（他のメニュー項目は削除）
+        [MenuItem("ずん解/衣装調整ツール")]
+        public static void ShowCostumeFitter() {
+            CostumeFitter.ShowWindow();
+        }
     }
 }
