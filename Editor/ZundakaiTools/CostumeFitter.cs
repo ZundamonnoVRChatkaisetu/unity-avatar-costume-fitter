@@ -24,7 +24,7 @@ namespace ZundakaiTools {
         
         // About情報
         private bool showAboutInfo = false;
-        private string aboutInfo = "全アバター衣装自動調整ツール\nVersion 1.3\n\n衣装をアバターに自動的に合わせるツールです。\n\n使い方：\n1. アバターと衣装をドラッグ＆ドロップで選択\n2. 「ボーンマッピング」タブで対応関係を確認・調整\n3. 「衣装を着せる」ボタンをクリック\n4. 微調整バーで細かい調整を行う";
+        private string aboutInfo = "全アバター衣装自動調整ツール\nVersion 1.4\n\n衣装をアバターに自動的に合わせるツールです。\n\n使い方：\n1. アバターと衣装をドラッグ＆ドロップで選択\n2. 「ボーンマッピング」タブで対応関係を確認・調整\n3. 「衣装を着せる」ボタンをクリック\n4. 微調整バーで細かい調整を行う";
         
         // メッシュキャッシュ（リアルタイム調整用）
         private Dictionary<SkinnedMeshRenderer, Mesh> originalMeshes = new Dictionary<SkinnedMeshRenderer, Mesh>();
@@ -40,6 +40,13 @@ namespace ZundakaiTools {
         private List<Transform> avatarBones = new List<Transform>();
         private List<Transform> costumeBones = new List<Transform>();
         private string filterText = "";
+        
+        // ボーン階層ビューア
+        private bool showBoneHierarchy = false;
+        private Vector2 boneHierarchyScrollPos;
+        private Transform selectedBone;
+        private bool showAvatarHierarchy = true;
+        private bool showCostumeHierarchy = true;
         
         // UI全体のスクロール
         private Vector2 mainScrollPosition;
@@ -163,6 +170,14 @@ namespace ZundakaiTools {
             
             EditorGUILayout.Space();
             
+            // ボーン階層ビューア
+            showBoneHierarchy = EditorGUILayout.Foldout(showBoneHierarchy, "ボーン階層ビューア");
+            if (showBoneHierarchy) {
+                DrawBoneHierarchyUI();
+            }
+            
+            EditorGUILayout.Space();
+            
             // ボーンマッピング表示
             showBoneMapping = EditorGUILayout.Foldout(showBoneMapping, "ボーンマッピング");
             if (showBoneMapping) {
@@ -207,6 +222,200 @@ namespace ZundakaiTools {
             if (Event.current.type == EventType.MouseMove || 
                 Event.current.type == EventType.KeyDown) {
                 Repaint();
+            }
+        }
+        
+        // ボーン階層ビューアUI
+        private void DrawBoneHierarchyUI() {
+            if (avatarObject == null && costumeObject == null) {
+                EditorGUILayout.HelpBox("アバターまたは衣装を選択してください", MessageType.Info);
+                return;
+            }
+            
+            EditorGUILayout.BeginVertical("box");
+            
+            // 表示切り替えトグル
+            EditorGUILayout.BeginHorizontal();
+            showAvatarHierarchy = EditorGUILayout.ToggleLeft("アバターボーン", showAvatarHierarchy, GUILayout.Width(120));
+            showCostumeHierarchy = EditorGUILayout.ToggleLeft("衣装ボーン", showCostumeHierarchy, GUILayout.Width(120));
+            EditorGUILayout.EndHorizontal();
+            
+            EditorGUILayout.Space();
+            
+            // フィルタリング
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("フィルタ:", GUILayout.Width(50));
+            string newFilterText = EditorGUILayout.TextField(filterText);
+            if (newFilterText != filterText) {
+                filterText = newFilterText;
+            }
+            if (GUILayout.Button("クリア", GUILayout.Width(60))) {
+                filterText = "";
+            }
+            EditorGUILayout.EndHorizontal();
+            
+            // スクロール開始
+            boneHierarchyScrollPos = EditorGUILayout.BeginScrollView(boneHierarchyScrollPos, GUILayout.Height(200));
+            
+            if (showAvatarHierarchy && avatarObject != null) {
+                EditorGUILayout.LabelField("アバターボーン階層:", EditorStyles.boldLabel);
+                DrawHierarchy(avatarObject.transform, 0);
+                EditorGUILayout.Space();
+            }
+            
+            if (showCostumeHierarchy && costumeObject != null) {
+                EditorGUILayout.LabelField("衣装ボーン階層:", EditorStyles.boldLabel);
+                DrawHierarchy(costumeObject.transform, 0);
+            }
+            
+            EditorGUILayout.EndScrollView();
+            
+            // 選択されたボーンの情報
+            if (selectedBone != null) {
+                EditorGUILayout.Space();
+                EditorGUILayout.LabelField("選択されたボーン情報:", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("名前:", selectedBone.name);
+                EditorGUILayout.LabelField("位置:", selectedBone.position.ToString());
+                EditorGUILayout.LabelField("ローカル位置:", selectedBone.localPosition.ToString());
+                EditorGUILayout.LabelField("スケール:", selectedBone.localScale.ToString());
+                
+                // 親ボーン
+                if (selectedBone.parent != null) {
+                    EditorGUILayout.LabelField("親ボーン:", selectedBone.parent.name);
+                }
+                
+                // 子ボーン
+                if (selectedBone.childCount > 0) {
+                    EditorGUILayout.LabelField("子ボーン:");
+                    EditorGUI.indentLevel++;
+                    for (int i = 0; i < selectedBone.childCount; i++) {
+                        EditorGUILayout.LabelField("- " + selectedBone.GetChild(i).name);
+                    }
+                    EditorGUI.indentLevel--;
+                }
+            }
+            
+            // 自動修正ボタンを追加
+            if (avatarObject != null && activeCostumeInstance != null) {
+                EditorGUILayout.Space();
+                if (GUILayout.Button("ボーンの自動修正", GUILayout.Height(30))) {
+                    AutoFixBones();
+                }
+                EditorGUILayout.HelpBox("このボタンは衣装を着せた後に使用できます。問題のあるボーンを検出して自動修正します。", MessageType.Info);
+            }
+            
+            EditorGUILayout.EndVertical();
+        }
+        
+        // 階層を再帰的に描画
+        private void DrawHierarchy(Transform transform, int depth) {
+            // フィルタがある場合は適用
+            if (!string.IsNullOrEmpty(filterText) && 
+                !transform.name.ToLowerInvariant().Contains(filterText.ToLowerInvariant())) {
+                
+                // 子を検索
+                bool hasMatchingChild = false;
+                for (int i = 0; i < transform.childCount; i++) {
+                    Transform child = transform.GetChild(i);
+                    if (child.name.ToLowerInvariant().Contains(filterText.ToLowerInvariant())) {
+                        hasMatchingChild = true;
+                        break;
+                    }
+                }
+                
+                if (!hasMatchingChild) {
+                    return;
+                }
+            }
+            
+            // インデント
+            EditorGUI.indentLevel = depth;
+            
+            // ボーン名をクリックで選択
+            EditorGUILayout.BeginHorizontal();
+            
+            // 折りたたみアイコン（子がある場合のみ）
+            if (transform.childCount > 0) {
+                bool isExpanded = EditorGUILayout.Foldout(true, "", true, GUILayout.Width(10));
+                if (!isExpanded) {
+                    EditorGUILayout.EndHorizontal();
+                    return;
+                }
+            } else {
+                GUILayout.Space(12); // 子がない場合、フォールドアウトの代わりにスペース
+            }
+            
+            // ボーン名にボタンを追加
+            GUI.backgroundColor = (selectedBone == transform) ? Color.cyan : Color.white;
+            if (GUILayout.Button(transform.name, EditorStyles.label)) {
+                selectedBone = transform;
+                Selection.activeObject = transform.gameObject;
+                EditorGUIUtility.PingObject(transform.gameObject);
+            }
+            GUI.backgroundColor = Color.white;
+            
+            EditorGUILayout.EndHorizontal();
+            
+            // 子ボーンを表示
+            for (int i = 0; i < transform.childCount; i++) {
+                DrawHierarchy(transform.GetChild(i), depth + 1);
+            }
+        }
+        
+        // ボーンの自動修正機能
+        private void AutoFixBones() {
+            if (avatarObject == null || activeCostumeInstance == null) {
+                Debug.LogError("アバターと衣装が揃っていません");
+                return;
+            }
+            
+            Animator avatarAnimator = avatarObject.GetComponent<Animator>();
+            if (avatarAnimator == null || !avatarAnimator.isHuman) {
+                Debug.LogError("アバターはHumanoidでなければなりません");
+                return;
+            }
+            
+            // 問題のあるボーンを検索して修正
+            SkinnedMeshRenderer[] renderers = activeCostumeInstance.GetComponentsInChildren<SkinnedMeshRenderer>();
+            int fixedCount = 0;
+            
+            foreach (SkinnedMeshRenderer renderer in renderers) {
+                if (renderer == null || renderer.bones == null) continue;
+                
+                bool hasChange = false;
+                Transform[] bones = renderer.bones;
+                
+                // 各ボーンをチェック
+                for (int i = 0; i < bones.Length; i++) {
+                    if (bones[i] == null) {
+                        // 見つからないボーンを置き換え
+                        Transform replacement = avatarAnimator.GetBoneTransform(HumanBodyBones.Hips);
+                        if (replacement != null) {
+                            bones[i] = replacement;
+                            hasChange = true;
+                            fixedCount++;
+                        }
+                    }
+                }
+                
+                // 変更があればボーンを更新
+                if (hasChange) {
+                    renderer.bones = bones;
+                }
+                
+                // ルートボーンがnullの場合は修正
+                if (renderer.rootBone == null) {
+                    renderer.rootBone = avatarAnimator.GetBoneTransform(HumanBodyBones.Hips);
+                    fixedCount++;
+                }
+            }
+            
+            // 自動修正の結果を表示
+            if (fixedCount > 0) {
+                Debug.Log($"ボーンの自動修正が完了しました: {fixedCount}箇所を修正");
+                EditorUtility.DisplayDialog("自動修正完了", $"{fixedCount}箇所のボーン問題を修正しました。", "OK");
+            } else {
+                EditorUtility.DisplayDialog("自動修正", "修正が必要なボーンは見つかりませんでした。", "OK");
             }
         }
         
@@ -273,6 +482,7 @@ namespace ZundakaiTools {
                     // ボーンをヒエラルキー上で選択
                     Selection.activeObject = avatarBone.gameObject;
                     EditorGUIUtility.PingObject(avatarBone.gameObject);
+                    selectedBone = avatarBone; // 階層ビューアでも選択
                 }
                 
                 // 衣装ボーン選択ドロップダウン
@@ -362,6 +572,7 @@ namespace ZundakaiTools {
                         // 衣装のボーンをヒエラルキー上で選択
                         Selection.activeObject = mappedBone.gameObject;
                         EditorGUIUtility.PingObject(mappedBone.gameObject);
+                        selectedBone = mappedBone; // 階層ビューアでも選択
                     }
                     EditorGUILayout.Space();
                 }
