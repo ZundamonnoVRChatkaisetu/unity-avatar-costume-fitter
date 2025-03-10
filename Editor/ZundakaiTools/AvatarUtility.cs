@@ -191,6 +191,17 @@ namespace ZundakaiTools {
 
             return closestBone;
         }
+        
+        // 位置を指定して最も近いボーンを探す（パブリックメソッド）
+        public static Transform FindBoneByPosition(Transform root, Vector3 position, float maxDistance = float.MaxValue) {
+            Transform closestBone = null;
+            float closestDistance = maxDistance;
+            
+            // 再帰的に検索
+            SearchClosestBoneByPosition(root, position, ref closestBone, ref closestDistance);
+            
+            return closestBone;
+        }
 
         // 名前からボーンタイプを推定
         private static HumanBodyBones EstimateBoneTypeFromName(string normalizedBoneName) {
