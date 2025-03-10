@@ -65,7 +65,7 @@ namespace ZundakaiTools {
             }
         }
         
-        [MenuItem("ずん解/ボーン自動修正")]
+        // メニュー項目を削除（内部からのみ利用可能）
         public static void ShowWindow() {
             GetWindow<BoneAutoFixer>("ボーン自動修正");
         }
