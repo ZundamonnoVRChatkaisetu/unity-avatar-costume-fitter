@@ -53,21 +53,21 @@ namespace ZundakaiTools {
             }
             
             // SkinnedMeshRendererの場合は特別な処理
-            if (obj is SkinnedMeshRenderer renderer) {
-                if (renderer.sharedMesh != null) {
-                    renderer.sharedMesh.RecalculateBounds();
+            if (obj is SkinnedMeshRenderer skinnedRenderer) {
+                if (skinnedRenderer.sharedMesh != null) {
+                    skinnedRenderer.sharedMesh.RecalculateBounds();
                 }
             }
             
             // GameObjectの場合は子も含めて更新
             if (obj is GameObject gameObject) {
                 SkinnedMeshRenderer[] renderers = gameObject.GetComponentsInChildren<SkinnedMeshRenderer>();
-                foreach (SkinnedMeshRenderer renderer in renderers) {
-                    if (renderer.sharedMesh != null) {
-                        renderer.sharedMesh.RecalculateBounds();
-                        EditorUtility.SetDirty(renderer.sharedMesh);
+                foreach (SkinnedMeshRenderer meshRenderer in renderers) {
+                    if (meshRenderer.sharedMesh != null) {
+                        meshRenderer.sharedMesh.RecalculateBounds();
+                        EditorUtility.SetDirty(meshRenderer.sharedMesh);
                     }
-                    EditorUtility.SetDirty(renderer);
+                    EditorUtility.SetDirty(meshRenderer);
                 }
                 
                 // Transformも更新
