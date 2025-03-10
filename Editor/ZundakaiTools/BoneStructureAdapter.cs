@@ -14,6 +14,9 @@ namespace ZundakaiTools {
         // ボーンのマッピングテーブル（アバターボーン名 -> 衣装ボーン名）
         private Dictionary<string, string> boneNameMapping = new Dictionary<string, string>();
         
+        // ボーンのマッピングテーブル（アバターボーン -> 衣装ボーン）
+        private Dictionary<Transform, Transform> directBoneMapping = new Dictionary<Transform, Transform>();
+        
         // ボーンノード（階層構造を表現）
         public class BoneNode {
             public Transform transform;
@@ -46,6 +49,7 @@ namespace ZundakaiTools {
             avatarBoneHierarchy.Clear();
             costumeBoneHierarchy.Clear();
             boneNameMapping.Clear();
+            directBoneMapping.Clear();
             
             // アバターのボーン階層を解析
             if (avatar != null) {
@@ -67,6 +71,12 @@ namespace ZundakaiTools {
             
             // 構造的な分析とマッピングの改善
             AnalyzeStructuralDifferences();
+            
+            // 空間的位置に基づくマッピングの追加
+            GeneratePositionalMapping(avatar, costume);
+            
+            // ダイレクトマッピングの作成
+            CreateDirectBoneMapping(avatar, costume);
         }
         
         /// <summary>
@@ -217,11 +227,130 @@ namespace ZundakaiTools {
         }
         
         /// <summary>
+        /// 空間的位置に基づくマッピングを生成
+        /// </summary>
+        private void GeneratePositionalMapping(GameObject avatar, GameObject costume) {
+            if (avatar == null || costume == null) return;
+            
+            Transform[] avatarBones = avatar.GetComponentsInChildren<Transform>();
+            Transform[] costumeBones = costume.GetComponentsInChildren<Transform>();
+            
+            // アバターの骨格バウンディングボックスを計算
+            Vector3 avatarMin = Vector3.positiveInfinity;
+            Vector3 avatarMax = Vector3.negativeInfinity;
+            foreach (Transform bone in avatarBones) {
+                if (bone == null) continue;
+                avatarMin = Vector3.Min(avatarMin, bone.position);
+                avatarMax = Vector3.Max(avatarMax, bone.position);
+            }
+            Vector3 avatarSize = avatarMax - avatarMin;
+            Vector3 avatarCenter = (avatarMax + avatarMin) / 2f;
+            
+            // 衣装の骨格バウンディングボックスを計算
+            Vector3 costumeMin = Vector3.positiveInfinity;
+            Vector3 costumeMax = Vector3.negativeInfinity;
+            foreach (Transform bone in costumeBones) {
+                if (bone == null) continue;
+                costumeMin = Vector3.Min(costumeMin, bone.position);
+                costumeMax = Vector3.Max(costumeMax, bone.position);
+            }
+            Vector3 costumeSize = costumeMax - costumeMin;
+            Vector3 costumeCenter = (costumeMax + costumeMin) / 2f;
+            
+            // サイズが0にならないよう防止
+            if (avatarSize.magnitude < 0.001f) avatarSize = Vector3.one;
+            if (costumeSize.magnitude < 0.001f) costumeSize = Vector3.one;
+            
+            // まだマッピングされていないアバターボーンについて処理
+            foreach (var avatarEntry in avatarBoneHierarchy) {
+                if (boneNameMapping.ContainsKey(avatarEntry.Key)) continue;
+                
+                BoneNode avatarNode = avatarEntry.Value;
+                
+                // アバターボーンの正規化座標を計算（-1～1の範囲）
+                Vector3 normalizedAvatarPos = (avatarNode.worldPosition - avatarCenter);
+                normalizedAvatarPos.x /= avatarSize.x * 0.5f;
+                normalizedAvatarPos.y /= avatarSize.y * 0.5f;
+                normalizedAvatarPos.z /= avatarSize.z * 0.5f;
+                
+                // 最も近い衣装ボーンを探す
+                float bestSimilarity = 0;
+                string bestMatch = null;
+                
+                foreach (var costumeEntry in costumeBoneHierarchy) {
+                    if (boneNameMapping.ContainsValue(costumeEntry.Key)) continue;
+                    
+                    BoneNode costumeNode = costumeEntry.Value;
+                    
+                    // 衣装ボーンの正規化座標を計算
+                    Vector3 normalizedCostumePos = (costumeNode.worldPosition - costumeCenter);
+                    normalizedCostumePos.x /= costumeSize.x * 0.5f;
+                    normalizedCostumePos.y /= costumeSize.y * 0.5f;
+                    normalizedCostumePos.z /= costumeSize.z * 0.5f;
+                    
+                    // 座標の類似度を計算（1に近いほど似ている）
+                    float similarity = 1.0f - (Vector3.Distance(normalizedAvatarPos, normalizedCostumePos) / 3.5f);
+                    
+                    // 名前の類似度も考慮
+                    float nameSimilarity = 0;
+                    if (avatarNode.normalizedName.Contains(costumeNode.normalizedName) || 
+                        costumeNode.normalizedName.Contains(avatarNode.normalizedName)) {
+                        nameSimilarity = 0.5f;
+                    }
+                    
+                    // 総合スコア
+                    float totalScore = similarity * 0.6f + nameSimilarity * 0.4f;
+                    
+                    if (totalScore > bestSimilarity && totalScore > 0.5f) {
+                        bestSimilarity = totalScore;
+                        bestMatch = costumeEntry.Key;
+                    }
+                }
+                
+                // 良い一致が見つかった場合はマッピングに追加
+                if (bestMatch != null) {
+                    boneNameMapping[avatarEntry.Key] = bestMatch;
+                }
+            }
+        }
+        
+        /// <summary>
+        /// トランスフォーム間の直接マッピングを作成
+        /// </summary>
+        private void CreateDirectBoneMapping(GameObject avatar, GameObject costume) {
+            if (avatar == null || costume == null) return;
+            
+            Transform[] avatarBones = avatar.GetComponentsInChildren<Transform>();
+            
+            foreach (Transform avatarBone in avatarBones) {
+                if (avatarBone == null) continue;
+                
+                // 名前ベースのマッピングからトランスフォームを取得
+                if (boneNameMapping.TryGetValue(avatarBone.name, out string costumeBoneName)) {
+                    Transform costumeTransform = FindBoneInHierarchy(costume.transform, costumeBoneName);
+                    if (costumeTransform != null) {
+                        directBoneMapping[avatarBone] = costumeTransform;
+                    }
+                }
+            }
+        }
+        
+        /// <summary>
         /// アバターボーンに対応する衣装のボーンを取得
         /// </summary>
         public Transform GetCorrespondingCostumeBone(string avatarBoneName, GameObject costumeObject) {
             if (boneNameMapping.TryGetValue(avatarBoneName, out string costumeBoneName)) {
                 return FindBoneInHierarchy(costumeObject.transform, costumeBoneName);
+            }
+            return null;
+        }
+        
+        /// <summary>
+        /// アバターボーンに対応する衣装のボーンを直接取得（トランスフォーム参照）
+        /// </summary>
+        public Transform GetCorrespondingCostumeBone(Transform avatarBone) {
+            if (directBoneMapping.TryGetValue(avatarBone, out Transform costumeBone)) {
+                return costumeBone;
             }
             return null;
         }
@@ -277,10 +406,19 @@ namespace ZundakaiTools {
                 Transform costumeBone = GetCorrespondingCostumeBone(avatarBone.name, costumeInstance);
                 
                 if (costumeBone == null) {
+                    // 直接マッピングでも試す
+                    costumeBone = GetCorrespondingCostumeBone(avatarBone);
+                }
+                
+                if (costumeBone == null) {
                     // 対応するボーンがない場合は生成
                     costumeBone = GenerateBone(avatarBone, costumeInstance, boneType, generatedBones);
                     if (costumeBone != null) {
                         generatedBones[avatarBone.name] = costumeBone;
+                        
+                        // 新しく生成したボーンをマッピングに追加
+                        boneNameMapping[avatarBone.name] = costumeBone.name;
+                        directBoneMapping[avatarBone] = costumeBone;
                     }
                 }
             }
@@ -386,10 +524,16 @@ namespace ZundakaiTools {
                 return generatedBones[avatarParentBone.name];
             }
             
-            // 対応するボーンを探す
+            // 対応するボーンを探す - まず名前ベースで
             Transform costumeParentBone = GetCorrespondingCostumeBone(avatarParentBone.name, costumeInstance);
             
+            if (costumeParentBone == null) {
+                // 直接マッピングでも試す
+                costumeParentBone = GetCorrespondingCostumeBone(avatarParentBone);
+            }
+            
             if (costumeParentBone != null) {
+                // ボーンが見つかった場合
                 return costumeParentBone;
             } else {
                 // 再帰的に親を生成
@@ -404,6 +548,11 @@ namespace ZundakaiTools {
             Debug.Log("--- ボーンマッピング情報 ---");
             foreach (var entry in boneNameMapping) {
                 Debug.Log($"アバターボーン: {entry.Key} -> 衣装ボーン: {entry.Value}");
+            }
+            
+            Debug.Log("--- 直接ボーンマッピング情報 ---");
+            foreach (var entry in directBoneMapping) {
+                Debug.Log($"アバターボーン: {entry.Key.name} -> 衣装ボーン: {entry.Value.name}");
             }
             
             Debug.Log($"マッピング率: {boneNameMapping.Count}/{avatarBoneHierarchy.Count} ({(float)boneNameMapping.Count / avatarBoneHierarchy.Count * 100:F1}%)");
