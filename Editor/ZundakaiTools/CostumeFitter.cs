@@ -23,7 +23,7 @@ namespace ZundakaiTools {
         
         // About情報
         private bool showAboutInfo = false;
-        private string aboutInfo = "全アバター衣装自動調整ツール\nVersion 1.2\n\n衣装をアバターに自動的に合わせるツールです。\n\n使い方：\n1. アバターと衣装をドラッグ＆ドロップで選択\n2. 「衣装を着せる」ボタンをクリック\n3. 必要に応じてボーンマッピングを調整\n4. 微調整バーで細かい調整を行う";
+        private string aboutInfo = "全アバター衣装自動調整ツール\nVersion 1.2\n\n衣装をアバターに自動的に合わせるツールです。\n\n使い方：\n1. アバターと衣装をドラッグ＆ドロップで選択\n2. 「ボーンマッピング」タブで対応関係を確認・調整\n3. 「衣装を着せる」ボタンをクリック\n4. 微調整バーで細かい調整を行う";
         
         // メッシュキャッシュ（リアルタイム調整用）
         private Dictionary<SkinnedMeshRenderer, Mesh> originalMeshes = new Dictionary<SkinnedMeshRenderer, Mesh>();
@@ -31,33 +31,13 @@ namespace ZundakaiTools {
         // アバターのボーンマッピング
         private Dictionary<string, Transform> avatarBoneMapping;
         
-        // ボーンマッピング関連
+        // ボーン情報表示とマッピング
         private bool showBoneMapping = false;
-        private Vector2 boneMappingScrollPosition;
-        private Dictionary<string, string> manualBoneMapping = new Dictionary<string, string>();
-        private Dictionary<string, Transform> costumeBones = new Dictionary<string, Transform>();
-        private List<HumanBodyBones> keyBones = new List<HumanBodyBones> {
-            HumanBodyBones.Hips,
-            HumanBodyBones.Spine,
-            HumanBodyBones.Chest,
-            HumanBodyBones.UpperChest,
-            HumanBodyBones.Neck,
-            HumanBodyBones.Head,
-            HumanBodyBones.LeftShoulder,
-            HumanBodyBones.LeftUpperArm,
-            HumanBodyBones.LeftLowerArm,
-            HumanBodyBones.LeftHand,
-            HumanBodyBones.RightShoulder,
-            HumanBodyBones.RightUpperArm,
-            HumanBodyBones.RightLowerArm,
-            HumanBodyBones.RightHand,
-            HumanBodyBones.LeftUpperLeg,
-            HumanBodyBones.LeftLowerLeg,
-            HumanBodyBones.LeftFoot,
-            HumanBodyBones.RightUpperLeg,
-            HumanBodyBones.RightLowerLeg,
-            HumanBodyBones.RightFoot
-        };
+        private Vector2 boneMappingScrollPos;
+        private Dictionary<Transform, Transform> manualBoneMapping = new Dictionary<Transform, Transform>();
+        private List<Transform> avatarBones = new List<Transform>();
+        private List<Transform> costumeBones = new List<Transform>();
+        private string filterText = "";
         
         // エディタ更新時間
         private double lastUpdateTime;
@@ -147,6 +127,9 @@ namespace ZundakaiTools {
                 
                 // アバターのボーンマッピングを更新
                 UpdateAvatarBoneMapping();
+                
+                // ボーンリストを更新
+                UpdateBoneLists();
             }
             
             // ドラッグアンドドロップのヒント
@@ -158,13 +141,22 @@ namespace ZundakaiTools {
             GameObject newCostumeObject = (GameObject)EditorGUILayout.ObjectField(costumeObject, typeof(GameObject), true);
             if (newCostumeObject != costumeObject) {
                 costumeObject = newCostumeObject;
-                // 衣装が変更された場合、ボーン情報を更新
-                UpdateCostumeBones();
+                
+                // ボーンリストを更新
+                UpdateBoneLists();
             }
             
             // ドラッグアンドドロップのヒント
             EditorGUILayout.HelpBox("衣装をここにドラッグ＆ドロップしてください", MessageType.Info);
             EditorGUILayout.EndVertical();
+            
+            EditorGUILayout.Space();
+            
+            // ボーンマッピング表示
+            showBoneMapping = EditorGUILayout.Foldout(showBoneMapping, "ボーンマッピング");
+            if (showBoneMapping) {
+                DrawBoneMappingUI();
+            }
             
             EditorGUILayout.Space();
             
@@ -178,16 +170,6 @@ namespace ZundakaiTools {
                 createBlendShapes = EditorGUILayout.Toggle("ブレンドシェイプ作成", createBlendShapes);
                 
                 EditorGUILayout.EndVertical();
-            }
-            
-            EditorGUILayout.Space();
-            
-            // ボーンマッピングセクション（アバターと衣装が選択されているときのみ表示）
-            if (avatarObject != null && costumeObject != null) {
-                showBoneMapping = EditorGUILayout.Foldout(showBoneMapping, "ボーンマッピング設定（アバター ↔ 衣装）");
-                if (showBoneMapping) {
-                    DrawBoneMappingUI();
-                }
             }
             
             EditorGUILayout.Space();
@@ -214,172 +196,241 @@ namespace ZundakaiTools {
             }
         }
         
-        // ボーンマッピング用UIを描画
+        // ボーンマッピングUI
         private void DrawBoneMappingUI() {
-            EditorGUILayout.BeginVertical("box");
-            
-            EditorGUILayout.HelpBox("アバターと衣装のボーン対応関係を確認・調整できます。対応するボーンを選択してください。", MessageType.Info);
-            
-            if (GUILayout.Button("マッピングを更新", GUILayout.Height(25))) {
-                UpdateAvatarBoneMapping();
-                UpdateCostumeBones();
-                UpdateAutomaticBoneMapping();
+            if (avatarObject == null || costumeObject == null) {
+                EditorGUILayout.HelpBox("アバターと衣装を選択してください", MessageType.Info);
+                return;
             }
             
-            boneMappingScrollPosition = EditorGUILayout.BeginScrollView(boneMappingScrollPosition, GUILayout.Height(200));
+            EditorGUILayout.BeginVertical("box");
             
-            // 各主要ボーンについてマッピング設定を表示
-            Animator avatarAnimator = avatarObject?.GetComponent<Animator>();
-            if (avatarAnimator != null && avatarAnimator.isHuman) {
-                EditorGUILayout.BeginVertical();
+            // マッピングの説明文
+            EditorGUILayout.HelpBox("アバターと衣装のボーン対応関係を確認・調整できます。自動マッピングで対応できなかった場合は手動で調整してください。", MessageType.Info);
+            
+            // フィルタリング
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("フィルタ:", GUILayout.Width(50));
+            string newFilterText = EditorGUILayout.TextField(filterText);
+            if (newFilterText != filterText) {
+                filterText = newFilterText;
+            }
+            if (GUILayout.Button("クリア", GUILayout.Width(60))) {
+                filterText = "";
+            }
+            EditorGUILayout.EndHorizontal();
+            
+            // マッピングテーブルのヘッダー
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("アバターのボーン", EditorStyles.boldLabel, GUILayout.Width(200));
+            EditorGUILayout.LabelField("衣装のボーン", EditorStyles.boldLabel, GUILayout.Width(200));
+            EditorGUILayout.LabelField("対応状態", EditorStyles.boldLabel, GUILayout.Width(100));
+            EditorGUILayout.EndHorizontal();
+            
+            // スクロール開始
+            boneMappingScrollPos = EditorGUILayout.BeginScrollView(boneMappingScrollPos, GUILayout.Height(200));
+            
+            // ボーンリストが空の場合は更新
+            if (avatarBones.Count == 0 || costumeBones.Count == 0) {
+                UpdateBoneLists();
+            }
+            
+            // 対応表示
+            for (int i = 0; i < avatarBones.Count; i++) {
+                Transform avatarBone = avatarBones[i];
                 
-                // ヘッダー行
-                EditorGUILayout.BeginHorizontal("box");
-                EditorGUILayout.LabelField("ボーン種類", EditorStyles.boldLabel, GUILayout.Width(120));
-                EditorGUILayout.LabelField("アバターボーン", EditorStyles.boldLabel, GUILayout.Width(150));
-                EditorGUILayout.LabelField("↔", GUILayout.Width(20));
-                EditorGUILayout.LabelField("衣装ボーン", EditorStyles.boldLabel, GUILayout.Width(150));
-                EditorGUILayout.LabelField("状態", EditorStyles.boldLabel, GUILayout.Width(80));
-                EditorGUILayout.EndHorizontal();
-                
-                // 各ボーンタイプについて対応関係を表示
-                foreach (HumanBodyBones boneType in keyBones) {
-                    DrawBoneMappingRow(avatarAnimator, boneType);
+                // フィルタリング
+                if (!string.IsNullOrEmpty(filterText) && 
+                    !avatarBone.name.ToLowerInvariant().Contains(filterText.ToLowerInvariant())) {
+                    continue;
                 }
                 
-                EditorGUILayout.EndVertical();
-            } else {
-                EditorGUILayout.HelpBox("アバターがHumanoidモデルではありません。ボーンマッピングはHumanoidアバターでのみ使用できます。", MessageType.Warning);
+                EditorGUILayout.BeginHorizontal();
+                
+                // アバターボーン
+                EditorGUILayout.LabelField(avatarBone.name, GUILayout.Width(200));
+                
+                // 衣装ボーン選択ドロップダウン
+                Transform mappedBone = null;
+                if (manualBoneMapping.TryGetValue(avatarBone, out mappedBone)) {
+                    // 手動マッピングがある場合
+                } else {
+                    // 自動マッピングを試行
+                    mappedBone = FindCorrespondingBone(avatarBone);
+                }
+                
+                // ドロップダウンの作成
+                int selectedIndex = -1;
+                List<string> options = new List<string>();
+                options.Add("自動検出");
+                
+                for (int j = 0; j < costumeBones.Count; j++) {
+                    options.Add(costumeBones[j].name);
+                    if (mappedBone == costumeBones[j]) {
+                        selectedIndex = j + 1; // +1 は "自動検出" の分
+                    }
+                }
+                
+                // 現在の選択がない場合は自動検出を選択
+                if (selectedIndex == -1) {
+                    selectedIndex = 0;
+                }
+                
+                // ドロップダウン表示
+                int newSelectedIndex = EditorGUILayout.Popup(selectedIndex, options.ToArray(), GUILayout.Width(200));
+                
+                // 選択変更時の処理
+                if (newSelectedIndex != selectedIndex) {
+                    if (newSelectedIndex == 0) {
+                        // 自動検出を選択した場合はマッピングから削除
+                        if (manualBoneMapping.ContainsKey(avatarBone)) {
+                            manualBoneMapping.Remove(avatarBone);
+                        }
+                    } else {
+                        // 特定のボーンを選択した場合はマッピングに追加
+                        manualBoneMapping[avatarBone] = costumeBones[newSelectedIndex - 1];
+                    }
+                }
+                
+                // マッピング状態の表示
+                string statusLabel = "未マッピング";
+                Color originalColor = GUI.color;
+                
+                if (mappedBone != null) {
+                    if (manualBoneMapping.ContainsKey(avatarBone)) {
+                        statusLabel = "手動設定";
+                        GUI.color = Color.green;
+                    } else {
+                        statusLabel = "自動検出";
+                        GUI.color = Color.cyan;
+                    }
+                } else {
+                    GUI.color = Color.yellow;
+                }
+                
+                EditorGUILayout.LabelField(statusLabel, GUILayout.Width(100));
+                GUI.color = originalColor;
+                
+                EditorGUILayout.EndHorizontal();
             }
             
             EditorGUILayout.EndScrollView();
             
+            // マッピングのリセットボタン
+            if (GUILayout.Button("マッピングをリセット", GUILayout.Height(30))) {
+                manualBoneMapping.Clear();
+            }
+            
             EditorGUILayout.EndVertical();
         }
         
-        // ボーンマッピングの1行を描画
-        private void DrawBoneMappingRow(Animator avatarAnimator, HumanBodyBones boneType) {
-            Transform avatarBone = avatarAnimator.GetBoneTransform(boneType);
-            if (avatarBone == null) return; // ボーンが存在しない場合はスキップ
+        // 対応するボーンを見つける（自動）
+        private Transform FindCorrespondingBone(Transform avatarBone) {
+            if (avatarBone == null || costumeBones.Count == 0) return null;
             
-            string boneTypeName = boneType.ToString();
-            
-            EditorGUILayout.BeginHorizontal("box");
-            
-            // ボーン種類
-            EditorGUILayout.LabelField(boneTypeName, GUILayout.Width(120));
-            
-            // アバターのボーン名
-            EditorGUILayout.LabelField(avatarBone.name, GUILayout.Width(150));
-            
-            // 矢印
-            EditorGUILayout.LabelField("↔", GUILayout.Width(20));
-            
-            // 衣装のボーン選択
-            int selectedIndex = 0;
-            List<string> options = new List<string>();
-            List<Transform> boneOptions = new List<Transform>();
-            
-            // 最初の選択肢として「自動選択」を追加
-            options.Add("自動選択");
-            boneOptions.Add(null);
-            
-            // 衣装のすべてのボーンを追加
-            int index = 1;
-            foreach (var bone in costumeBones.Values) {
-                options.Add(bone.name);
-                boneOptions.Add(bone);
-                
-                // すでに手動マッピングが設定されている場合、そのインデックスを選択
-                if (manualBoneMapping.ContainsKey(boneTypeName) && 
-                    manualBoneMapping[boneTypeName] == bone.name) {
-                    selectedIndex = index;
-                }
-                
-                index++;
-            }
-            
-            // ボーン選択ドロップダウン
-            int newSelectedIndex = EditorGUILayout.Popup(selectedIndex, options.ToArray(), GUILayout.Width(150));
-            if (newSelectedIndex != selectedIndex) {
-                if (newSelectedIndex == 0) {
-                    // 「自動選択」が選ばれた場合、手動マッピングを削除
-                    if (manualBoneMapping.ContainsKey(boneTypeName)) {
-                        manualBoneMapping.Remove(boneTypeName);
-                    }
-                } else {
-                    // 特定のボーンが選ばれた場合、手動マッピングを設定
-                    string selectedBoneName = boneOptions[newSelectedIndex].name;
-                    manualBoneMapping[boneTypeName] = selectedBoneName;
+            // 1. 名前が完全一致するボーンを探す
+            foreach (Transform bone in costumeBones) {
+                if (bone.name == avatarBone.name) {
+                    return bone;
                 }
             }
             
-            // 状態表示（マッピング状態を色で表示）
-            string mappingStatus = "未マッピング";
-            MessageType messageType = MessageType.Warning;
-            
-            Transform matchedBone = FindCorrespondingCostumeBone(boneType);
-            if (matchedBone != null) {
-                mappingStatus = "OK";
-                messageType = MessageType.Info;
-            } else if (manualBoneMapping.ContainsKey(boneTypeName)) {
-                mappingStatus = "手動";
-                messageType = MessageType.Info;
+            // 2. 正規化された名前で比較
+            string normalizedName = AvatarUtility.NormalizeBoneName(avatarBone.name).ToLowerInvariant();
+            foreach (Transform bone in costumeBones) {
+                string boneName = AvatarUtility.NormalizeBoneName(bone.name).ToLowerInvariant();
+                if (boneName == normalizedName || 
+                    boneName.Contains(normalizedName) || 
+                    normalizedName.Contains(boneName)) {
+                    return bone;
+                }
             }
             
-            // 状態ラベル
-            GUIStyle statusStyle = new GUIStyle(EditorStyles.label);
-            statusStyle.normal.textColor = (messageType == MessageType.Info) ? 
-                                             Color.green : 
-                                             (messageType == MessageType.Warning) ? Color.yellow : Color.red;
+            // 3. 位置ベースのマッピング
+            Vector3 avatarBonePos = avatarBone.position;
+            Transform closestBone = null;
+            float closestDistance = float.MaxValue;
             
-            EditorGUILayout.LabelField(mappingStatus, statusStyle, GUILayout.Width(80));
+            foreach (Transform bone in costumeBones) {
+                float distance = Vector3.Distance(bone.position, avatarBonePos);
+                if (distance < closestDistance) {
+                    closestDistance = distance;
+                    closestBone = bone;
+                }
+            }
             
-            EditorGUILayout.EndHorizontal();
+            // 距離が近すぎる場合のみ返す (一定以上離れていると関係ないボーン)
+            if (closestDistance < 0.5f) {
+                return closestBone;
+            }
+            
+            return null;
         }
         
-        // 対応する衣装のボーンを見つける
-        private Transform FindCorrespondingCostumeBone(HumanBodyBones boneType) {
-            string boneTypeName = boneType.ToString();
+        // ボーンリストの更新
+        private void UpdateBoneLists() {
+            avatarBones.Clear();
+            costumeBones.Clear();
             
-            // 1. 手動マッピングを確認
-            if (manualBoneMapping.ContainsKey(boneTypeName)) {
-                string mappedBoneName = manualBoneMapping[boneTypeName];
-                foreach (var bone in costumeBones.Values) {
-                    if (bone.name == mappedBoneName) {
-                        return bone;
+            // アバターのボーンを取得
+            if (avatarObject != null) {
+                Animator avatarAnimator = avatarObject.GetComponent<Animator>();
+                if (avatarAnimator != null && avatarAnimator.isHuman) {
+                    // 主要なヒューマノイドボーンを追加
+                    foreach (HumanBodyBones boneType in System.Enum.GetValues(typeof(HumanBodyBones))) {
+                        if (boneType == HumanBodyBones.LastBone) continue;
+                        
+                        Transform bone = avatarAnimator.GetBoneTransform(boneType);
+                        if (bone != null && !avatarBones.Contains(bone)) {
+                            avatarBones.Add(bone);
+                        }
+                    }
+                    
+                    // 他のボーンも追加（オプション）
+                    /*
+                    foreach (Transform bone in avatarObject.GetComponentsInChildren<Transform>()) {
+                        if (!avatarBones.Contains(bone)) {
+                            avatarBones.Add(bone);
+                        }
+                    }
+                    */
+                }
+            }
+            
+            // 衣装のボーンを取得
+            if (costumeObject != null) {
+                // スキンメッシュレンダラーのボーンを取得
+                SkinnedMeshRenderer[] renderers = costumeObject.GetComponentsInChildren<SkinnedMeshRenderer>();
+                foreach (SkinnedMeshRenderer renderer in renderers) {
+                    if (renderer.bones != null) {
+                        foreach (Transform bone in renderer.bones) {
+                            if (bone != null && !costumeBones.Contains(bone)) {
+                                costumeBones.Add(bone);
+                            }
+                        }
                     }
                 }
-            }
-            
-            // 2. 自動マッピングで探す
-            Animator avatarAnimator = avatarObject?.GetComponent<Animator>();
-            if (avatarAnimator == null) return null;
-            
-            Transform avatarBone = avatarAnimator.GetBoneTransform(boneType);
-            if (avatarBone == null) return null;
-            
-            string normalizedBoneName = AvatarUtility.NormalizeBoneName(avatarBone.name).ToLowerInvariant();
-            
-            // 名前で探す
-            foreach (var bone in costumeBones.Values) {
-                string boneName = AvatarUtility.NormalizeBoneName(bone.name).ToLowerInvariant();
-                if (boneName.Contains(normalizedBoneName) || normalizedBoneName.Contains(boneName)) {
-                    return bone;
+                
+                // ルートボーンが含まれていない場合は追加
+                foreach (SkinnedMeshRenderer renderer in renderers) {
+                    if (renderer.rootBone != null && !costumeBones.Contains(renderer.rootBone)) {
+                        costumeBones.Add(renderer.rootBone);
+                    }
                 }
-            }
-            
-            // ボーンタイプ名で探す
-            string boneTypeNameLower = boneTypeName.ToLowerInvariant();
-            foreach (var bone in costumeBones.Values) {
-                string boneName = AvatarUtility.NormalizeBoneName(bone.name).ToLowerInvariant();
-                if (boneName.Contains(boneTypeNameLower) || boneTypeNameLower.Contains(boneName)) {
-                    return bone;
+                
+                // 他のボーンも追加（オプション）
+                /*
+                foreach (Transform bone in costumeObject.GetComponentsInChildren<Transform>()) {
+                    if (!costumeBones.Contains(bone)) {
+                        costumeBones.Add(bone);
+                    }
                 }
+                */
             }
             
-            // 位置ベースで探す
-            return AvatarUtility.FindBoneByPosition(costumeObject.transform, avatarBone.position, 0.3f);
+            // ボーンを階層順にソート
+            avatarBones.Sort((a, b) => a.name.CompareTo(b.name));
+            costumeBones.Sort((a, b) => a.name.CompareTo(b.name));
         }
         
         // アバターのボーンマッピングを更新
@@ -396,52 +447,6 @@ namespace ZundakaiTools {
             }
             
             avatarBoneMapping = AvatarUtility.GetAvatarBoneMapping(avatarAnimator);
-        }
-        
-        // 衣装のボーン情報を更新
-        private void UpdateCostumeBones() {
-            costumeBones.Clear();
-            
-            if (costumeObject == null) return;
-            
-            // 衣装の階層からすべてのボーンを取得
-            Transform[] allBones = costumeObject.GetComponentsInChildren<Transform>(true);
-            for (int i = 0; i < allBones.Length; i++) {
-                string boneName = allBones[i].name;
-                costumeBones[boneName] = allBones[i];
-            }
-            
-            // SkinnedMeshRendererのボーンも追加
-            SkinnedMeshRenderer[] renderers = costumeObject.GetComponentsInChildren<SkinnedMeshRenderer>(true);
-            foreach (SkinnedMeshRenderer renderer in renderers) {
-                if (renderer.bones != null) {
-                    foreach (Transform bone in renderer.bones) {
-                        if (bone != null && !costumeBones.ContainsKey(bone.name)) {
-                            costumeBones[bone.name] = bone;
-                        }
-                    }
-                }
-            }
-            
-            // 自動マッピングを更新
-            UpdateAutomaticBoneMapping();
-        }
-        
-        // 自動ボーンマッピングを更新
-        private void UpdateAutomaticBoneMapping() {
-            if (avatarObject == null || costumeObject == null) return;
-            
-            Animator avatarAnimator = avatarObject.GetComponent<Animator>();
-            if (avatarAnimator == null || !avatarAnimator.isHuman) return;
-            
-            // 既存の手動マッピングは保持
-            Dictionary<string, string> newMapping = new Dictionary<string, string>();
-            
-            foreach (var entry in manualBoneMapping) {
-                newMapping[entry.Key] = entry.Value;
-            }
-            
-            manualBoneMapping = newMapping;
         }
         
         // 既存の衣装を削除
@@ -502,9 +507,6 @@ namespace ZundakaiTools {
                 );
             }
             
-            // 衣装のボーン情報を更新
-            UpdateCostumeBones();
-            
             // スキンメッシュの転送（ボーンのバインド）
             TransferSkinnedMeshes(avatarAnimator, activeCostumeInstance);
             
@@ -516,14 +518,29 @@ namespace ZundakaiTools {
             SceneView.RepaintAll();
             
             Debug.Log("衣装の適用が完了しました");
-            
-            // 自動でボーンマッピング設定を表示
-            showBoneMapping = true;
         }
         
         private void TransferSkinnedMeshes(Animator avatarAnimator, GameObject costumeInstance) {
             // 衣装のスキンメッシュレンダラーを取得
             SkinnedMeshRenderer[] costumeRenderers = costumeInstance.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            
+            // 衣装のボーンインスタンスを取得
+            Dictionary<string, Transform> costumeBonesDict = new Dictionary<string, Transform>();
+            foreach (Transform bone in costumeInstance.GetComponentsInChildren<Transform>()) {
+                costumeBonesDict[bone.name] = bone;
+            }
+            
+            // 手動マッピングの逆引き辞書を作成
+            Dictionary<Transform, Transform> reverseMappings = new Dictionary<Transform, Transform>();
+            foreach (var pair in manualBoneMapping) {
+                if (pair.Value != null) {
+                    string boneName = pair.Value.name;
+                    if (costumeBonesDict.ContainsKey(boneName)) {
+                        Transform instanceBone = costumeBonesDict[boneName];
+                        reverseMappings[instanceBone] = pair.Key;
+                    }
+                }
+            }
             
             foreach (SkinnedMeshRenderer costumeRenderer in costumeRenderers) {
                 // オリジナルのメッシュを保存
@@ -544,6 +561,12 @@ namespace ZundakaiTools {
                 for (int i = 0; i < originalBones.Length; i++) {
                     if (originalBones[i] == null) {
                         newBones[i] = null;
+                        continue;
+                    }
+                    
+                    // 手動マッピングがあるか確認
+                    if (reverseMappings.TryGetValue(originalBones[i], out Transform mappedAvatarBone)) {
+                        newBones[i] = mappedAvatarBone;
                         continue;
                     }
                     
@@ -580,14 +603,19 @@ namespace ZundakaiTools {
                 
                 // ルートボーンをアバターの対応するボーンに設定
                 if (costumeRenderer.rootBone != null) {
-                    string rootBoneName = costumeRenderer.rootBone.name;
-                    Transform avatarRootBone = FindCorrespondingAvatarBone(avatarAnimator, rootBoneName, costumeRenderer.rootBone);
-                    
-                    if (avatarRootBone != null) {
-                        costumeRenderer.rootBone = avatarRootBone;
+                    // 手動マッピングがあるか確認
+                    if (reverseMappings.TryGetValue(costumeRenderer.rootBone, out Transform mappedAvatarBone)) {
+                        costumeRenderer.rootBone = mappedAvatarBone;
                     } else {
-                        // ルートボーンが見つからない場合は、Hipsなど主要なボーンを代わりに使用
-                        costumeRenderer.rootBone = avatarAnimator.GetBoneTransform(HumanBodyBones.Hips);
+                        string rootBoneName = costumeRenderer.rootBone.name;
+                        Transform avatarRootBone = FindCorrespondingAvatarBone(avatarAnimator, rootBoneName, costumeRenderer.rootBone);
+                        
+                        if (avatarRootBone != null) {
+                            costumeRenderer.rootBone = avatarRootBone;
+                        } else {
+                            // ルートボーンが見つからない場合は、Hipsなど主要なボーンを代わりに使用
+                            costumeRenderer.rootBone = avatarAnimator.GetBoneTransform(HumanBodyBones.Hips);
+                        }
                     }
                 }
                 
@@ -613,35 +641,24 @@ namespace ZundakaiTools {
         
         // 対応するアバターのボーンを見つける（改良版）
         private Transform FindCorrespondingAvatarBone(Animator avatarAnimator, string boneName, Transform originalBone) {
-            // 1. 手動マッピングを確認
-            foreach (HumanBodyBones boneType in keyBones) {
-                string boneTypeName = boneType.ToString();
-                
-                // 手動マッピングでこのボーン名が指定されているかを確認
-                if (manualBoneMapping.ContainsKey(boneTypeName) && 
-                    manualBoneMapping[boneTypeName] == boneName) {
-                    return avatarAnimator.GetBoneTransform(boneType);
-                }
-            }
-            
-            // 2. 名前が完全に一致する場合
+            // 1. 名前が完全一致する場合
             if (avatarBoneMapping != null && avatarBoneMapping.TryGetValue(boneName, out Transform exactMatch)) {
                 return exactMatch;
             }
             
-            // 3. 正規化された名前で検索
+            // 2. 正規化された名前で検索
             string normalizedName = AvatarUtility.NormalizeBoneName(boneName);
             if (avatarBoneMapping != null && avatarBoneMapping.TryGetValue(normalizedName, out Transform normalizedMatch)) {
                 return normalizedMatch;
             }
             
-            // 4. ヒューマノイドボーンから推定
+            // 3. ヒューマノイドボーンから推定
             Transform humanoidMatch = AvatarUtility.GetHumanoidBone(avatarAnimator, boneName);
             if (humanoidMatch != null) {
                 return humanoidMatch;
             }
             
-            // 5. 位置ベースのマッピング（最終手段）
+            // 4. 位置ベースのマッピング（最終手段）
             if (originalBone != null) {
                 // ボーンの相対位置を計算
                 Vector3 localPos = originalBone.localPosition;
@@ -731,7 +748,7 @@ namespace ZundakaiTools {
             EditorGUILayout.BeginVertical("box");
             EditorGUILayout.LabelField("衣装の微調整", EditorStyles.boldLabel);
             
-            scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition, GUILayout.Height(200));
+            scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
             
             // 各部位の調整スライダー
             List<string> keys = new List<string>(adjustmentValues.Keys);
@@ -1036,55 +1053,37 @@ namespace ZundakaiTools {
             return null;
         }
         
-        private void AdjustLimbScale(Animator avatarAnimator, GameObject costumeInstance, HumanBodyBones boneType, float scale) {
-            Transform avatarBone = avatarAnimator.GetBoneTransform(boneType);
+        private void AdjustLimbScale(Animator avatarAnimator, GameObject costumeInstance, HumanBodyBones boneName, float scale) {
+            Transform avatarBone = avatarAnimator.GetBoneTransform(boneName);
             if (avatarBone == null) return;
             
-            // 手動マッピングを優先して使用
-            string boneTypeName = boneType.ToString();
+            // 衣装内の対応するボーンを検索
+            string normalizedName = AvatarUtility.NormalizeBoneName(avatarBone.name).ToLowerInvariant();
             Transform costumeBone = null;
             
-            // 手動マッピングがある場合
-            if (manualBoneMapping.ContainsKey(boneTypeName)) {
-                string mappedName = manualBoneMapping[boneTypeName];
-                
-                foreach (Transform child in costumeInstance.GetComponentsInChildren<Transform>()) {
-                    if (child.name == mappedName) {
-                        costumeBone = child;
-                        break;
-                    }
+            // 階層から探す
+            foreach (Transform child in costumeInstance.GetComponentsInChildren<Transform>()) {
+                string childName = AvatarUtility.NormalizeBoneName(child.name).ToLowerInvariant();
+                if (childName.Contains(normalizedName) || normalizedName.Contains(childName)) {
+                    costumeBone = child;
+                    break;
                 }
             }
             
-            // 手動マッピングで見つからない場合は通常の検索
+            // SkinnedMeshRendererのボーンからも探す
             if (costumeBone == null) {
-                // 衣装内の対応するボーンを検索
-                string normalizedName = AvatarUtility.NormalizeBoneName(avatarBone.name).ToLowerInvariant();
-                
-                // 階層から探す
-                foreach (Transform child in costumeInstance.GetComponentsInChildren<Transform>()) {
-                    string childName = AvatarUtility.NormalizeBoneName(child.name).ToLowerInvariant();
-                    if (childName.Contains(normalizedName) || normalizedName.Contains(childName)) {
-                        costumeBone = child;
-                        break;
-                    }
-                }
-                
-                // SkinnedMeshRendererのボーンからも探す
-                if (costumeBone == null) {
-                    SkinnedMeshRenderer[] renderers = costumeInstance.GetComponentsInChildren<SkinnedMeshRenderer>();
-                    foreach (SkinnedMeshRenderer renderer in renderers) {
-                        for (int i = 0; i < renderer.bones.Length; i++) {
-                            if (renderer.bones[i] != null) {
-                                string boneName = AvatarUtility.NormalizeBoneName(renderer.bones[i].name).ToLowerInvariant();
-                                if (boneName.Contains(normalizedName) || normalizedName.Contains(boneName)) {
-                                    costumeBone = renderer.bones[i];
-                                    break;
-                                }
+                SkinnedMeshRenderer[] renderers = costumeInstance.GetComponentsInChildren<SkinnedMeshRenderer>();
+                foreach (SkinnedMeshRenderer renderer in renderers) {
+                    for (int i = 0; i < renderer.bones.Length; i++) {
+                        if (renderer.bones[i] != null) {
+                            string boneName2 = AvatarUtility.NormalizeBoneName(renderer.bones[i].name).ToLowerInvariant();
+                            if (boneName2.Contains(normalizedName) || normalizedName.Contains(boneName2)) {
+                                costumeBone = renderer.bones[i];
+                                break;
                             }
                         }
-                        if (costumeBone != null) break;
                     }
+                    if (costumeBone != null) break;
                 }
             }
             
